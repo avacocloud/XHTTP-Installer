@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "version": 1,
+  "buildCommand": "npm run build",
+  "functions": {
+    "api/index.js": {
+      "memory": 128,
+      "maxDuration": 60,
+      "regions": [
+        "iad1"
+      ]
+    }
+  },
+  "rewrites": [
+    { "source": "/api", "destination": "/api/index" },
+    { "source": "/api/:path*", "destination": "/api/index" },
+    { "source": "/:path*", "destination": "/api/index" }
+  ],
+  "trailingSlash": false
+}
+

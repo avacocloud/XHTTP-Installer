@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Frost — Cool treats for warm hearts. Handcrafted ice cream, gelato, and frozen desserts made with locally sourced ingredients.">
+  <meta name="keywords" content="ice cream, gelato, frozen desserts, bakery, catering, handcrafted treats">
+  <meta name="author" content="Frost Desserts">
+  <meta property="og:title" content="Frost — Cool Treats for Warm Hearts">
+  <meta property="og:description" content="Handcrafted ice cream, gelato, and frozen desserts made with locally sourced ingredients.">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Frost — Cool Treats for Warm Hearts</title>
+
+  <!-- Google Fonts: Lora + Manrope -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Manrope:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="templatemo-frost-style.css">
+<!--
+
+TemplateMo 613 Frost Bakery
+
+https://templatemo.com/tm-613-frost-bakery
+
+-->
+</head>
+<body>
+
+  <!-- ==========================================
+       Mobile Hamburger Button
+       ========================================== -->
+  <button class="hamburger" id="hamburger" aria-label="Toggle navigation menu" aria-expanded="false">
+    <div class="hamburger__lines">
+      <span></span>
+      <span></span>
+      <span></span>
+    </div>
+  </button>
+
+  <!-- Mobile Sidebar Overlay -->
+  <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+  <!-- ==========================================
+       Sidebar Navigation
+       ========================================== -->
+  <aside class="sidebar" id="sidebar" role="navigation" aria-label="Main navigation">
+    <div class="sidebar__brand">
+      <div class="sidebar__logo">Fr<span>o</span>st</div>
+      <div class="sidebar__tagline">Cool Treats for Warm Hearts</div>
+    </div>
+
+    <nav class="sidebar__nav">
+      <ul>
+        <li><a href="#hero" class="active"><span class="nav-icon">&#9678;</span> Home</a></li>
+        <li><a href="#flavors"><span class="nav-icon">&#10047;</span> Flavors</a></li>
+        <li><a href="#builder"><span class="nav-icon">&#9733;</span> Build Yours</a></li>
+        <li><a href="#catering"><span class="nav-icon">&#9738;</span> Catering</a></li>
+        <li><a href="#seasonal"><span class="nav-icon">&#10053;</span> Seasonal</a></li>
+        <li><a href="#loyalty"><span class="nav-icon">&#10084;</span> Loyalty</a></li>
+      </ul>
+    </nav>
+
+    <div class="sidebar__footer">
+      <div class="sidebar__hours">
+        <strong>Hours</strong><br>
+        Mon – Fri: 11am – 9pm<br>
+        Sat – Sun: 10am – 10pm
+      </div>
+    </div>
+  </aside>
+
+  <!-- ==========================================
+       Main Content
+       ========================================== -->
+  <main class="main">
+
+    <!-- ======= HERO ======= -->
+    <section class="hero" id="hero">
+      <div class="hero__content">
+        <div class="hero__badge reveal">Now Scooping</div>
+        <h1 class="hero__title reveal reveal-delay-1">
+          Life's too short for<br><em>boring desserts.</em>
+        </h1>
+        <p class="hero__subtitle reveal reveal-delay-2">
+          Handcrafted ice cream and gelato made fresh every morning with locally sourced milk, seasonal fruits, and a dash of something unexpected.
+        </p>
+        <div class="hero__actions reveal reveal-delay-3">
+          <a href="#flavors" class="btn btn--primary">Explore Flavors</a>
+          <a href="#catering" class="btn btn--outline">Book a Cart</a>
+        </div>
+      </div>
+
+      <!-- Decorative ice cream scoops -->
+      <div class="hero__deco" aria-hidden="true">
+        <div class="scoop scoop--strawberry">
+          <div class="scoop--highlight"></div>
+        </div>
+        <div class="scoop scoop--mint">
+          <div class="scoop--highlight"></div>
+        </div>
+        <div class="scoop scoop--vanilla">
+          <div class="scoop--highlight"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======= FLAVOR WHEEL — Ticker Marquee ======= -->
+    <section class="section section--alt flavors-section" id="flavors">
+      <div class="section__header reveal">
+        <span class="section__label">Flavor Wheel</span>
+        <h2 class="section__title">Pick your perfect scoop</h2>
+        <p class="section__desc">From timeless classics to rotating experiments, every flavor starts with a small-batch recipe and whole, real ingredients.</p>
+      </div>
+
+      <!-- Row 1: scrolls left -->
+      <div class="marquee">
+        <div class="marquee__track">
+          <!-- Original set -->
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #fce4b8, #e6c68a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Tahitian Vanilla Bean</h3>
+              <p class="flavor-card__desc">Single-origin vanilla pods steeped into a custard base with organic cream. Rich, floral, and never artificial.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__tag">Popular</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #6b3a2a, #3e2118);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Dark Chocolate Truffle</h3>
+              <p class="flavor-card__desc">70% cacao Belgian chocolate folded into a dense, fudgy base with hand-shaved truffle ribbons throughout.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, var(--sage-light), var(--sage-dark));"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Fresh Mint Chip</h3>
+              <p class="flavor-card__desc">Real peppermint leaves — no extract — blended with organic milk and dark chocolate shards from a local chocolatier.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__tag">Seasonal</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #c9b3d6, #9b7eb8);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Lavender Honey</h3>
+              <p class="flavor-card__desc">Dried French lavender infused into wildflower honey and slow-churned to a silky, floral finish.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #a8d8ea, #6bb7d4);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Sorbet</span>
+              <h3 class="flavor-card__name">Blue Spirulina Coconut</h3>
+              <p class="flavor-card__desc">A vibrant, dairy-free blend of spirulina and creamy coconut milk. Tropical, refreshing, and naturally blue.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #d4a76a, #b8863e);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Salted Caramel Pecan</h3>
+              <p class="flavor-card__desc">House-made caramel swirled with Maldon sea salt and candied Georgia pecans. The sweet-salty classic.</p>
+            </div>
+          </div>
+
+          <!-- Duplicate set for seamless loop -->
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #fce4b8, #e6c68a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Tahitian Vanilla Bean</h3>
+              <p class="flavor-card__desc">Single-origin vanilla pods steeped into a custard base with organic cream. Rich, floral, and never artificial.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__tag">Popular</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #6b3a2a, #3e2118);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Dark Chocolate Truffle</h3>
+              <p class="flavor-card__desc">70% cacao Belgian chocolate folded into a dense, fudgy base with hand-shaved truffle ribbons throughout.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, var(--sage-light), var(--sage-dark));"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Fresh Mint Chip</h3>
+              <p class="flavor-card__desc">Real peppermint leaves — no extract — blended with organic milk and dark chocolate shards from a local chocolatier.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__tag">Seasonal</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #c9b3d6, #9b7eb8);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Lavender Honey</h3>
+              <p class="flavor-card__desc">Dried French lavender infused into wildflower honey and slow-churned to a silky, floral finish.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #a8d8ea, #6bb7d4);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Sorbet</span>
+              <h3 class="flavor-card__name">Blue Spirulina Coconut</h3>
+              <p class="flavor-card__desc">A vibrant, dairy-free blend of spirulina and creamy coconut milk. Tropical, refreshing, and naturally blue.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #d4a76a, #b8863e);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Salted Caramel Pecan</h3>
+              <p class="flavor-card__desc">House-made caramel swirled with Maldon sea salt and candied Georgia pecans. The sweet-salty classic.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: scrolls right (reverse) -->
+        <div class="marquee__track marquee__track--reverse">
+          <!-- Original set -->
+          <div class="flavor-card">
+            <div class="flavor-card__tag">New</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #f4a4b8, #e07a8a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Sorbet</span>
+              <h3 class="flavor-card__name">Strawberry Basil</h3>
+              <p class="flavor-card__desc">Ripe summer strawberries meet fresh garden basil in a dairy-free, vegan-friendly sorbet that's light and aromatic.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #8b6f4e, #5c4632);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Espresso Cookie Crumble</h3>
+              <p class="flavor-card__desc">Double-shot espresso ice cream layered with crushed chocolate cookies and a caramel ribbon swirl.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #e8d5a3, #c4a96a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Pistachio Crema</h3>
+              <p class="flavor-card__desc">Roasted Sicilian pistachios blended into a silky-smooth gelato. Nutty, buttery, and unmistakably authentic.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__tag">Vegan</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #f7c59f, #ef8e38);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Sorbet</span>
+              <h3 class="flavor-card__name">Mango Passionfruit</h3>
+              <p class="flavor-card__desc">Ripe Alphonso mango and tangy passionfruit churned into a bright, tropical dairy-free sorbet.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #f0c2c2, #d4868a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Raspberry White Choc</h3>
+              <p class="flavor-card__desc">Tart raspberry ripple folded through creamy white chocolate ice cream with freeze-dried berry crunch.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #b6d7a8, #7ab55c);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Matcha Black Sesame</h3>
+              <p class="flavor-card__desc">Ceremonial-grade matcha swirled with toasted black sesame paste. Earthy, nutty, and deeply satisfying.</p>
+            </div>
+          </div>
+
+          <!-- Duplicate set for seamless loop -->
+          <div class="flavor-card">
+            <div class="flavor-card__tag">New</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #f4a4b8, #e07a8a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Sorbet</span>
+              <h3 class="flavor-card__name">Strawberry Basil</h3>
+              <p class="flavor-card__desc">Ripe summer strawberries meet fresh garden basil in a dairy-free, vegan-friendly sorbet that's light and aromatic.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #8b6f4e, #5c4632);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Espresso Cookie Crumble</h3>
+              <p class="flavor-card__desc">Double-shot espresso ice cream layered with crushed chocolate cookies and a caramel ribbon swirl.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #e8d5a3, #c4a96a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Pistachio Crema</h3>
+              <p class="flavor-card__desc">Roasted Sicilian pistachios blended into a silky-smooth gelato. Nutty, buttery, and unmistakably authentic.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__tag">Vegan</div>
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #f7c59f, #ef8e38);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Sorbet</span>
+              <h3 class="flavor-card__name">Mango Passionfruit</h3>
+              <p class="flavor-card__desc">Ripe Alphonso mango and tangy passionfruit churned into a bright, tropical dairy-free sorbet.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #f0c2c2, #d4868a);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Ice Cream</span>
+              <h3 class="flavor-card__name">Raspberry White Choc</h3>
+              <p class="flavor-card__desc">Tart raspberry ripple folded through creamy white chocolate ice cream with freeze-dried berry crunch.</p>
+            </div>
+          </div>
+
+          <div class="flavor-card">
+            <div class="flavor-card__swatch" style="background: radial-gradient(circle at 35% 35%, #b6d7a8, #7ab55c);"></div>
+            <div class="flavor-card__info">
+              <span class="flavor-card__type">Gelato</span>
+              <h3 class="flavor-card__name">Matcha Black Sesame</h3>
+              <p class="flavor-card__desc">Ceremonial-grade matcha swirled with toasted black sesame paste. Earthy, nutty, and deeply satisfying.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======= TOPPING BUILDER ======= -->
+    <section class="section builder" id="builder">
+      <div class="section__header reveal">
+        <span class="section__label">Build Your Own</span>
+        <h2 class="section__title">Your sundae, your rules</h2>
+        <p class="section__desc">Walk through our four-step sundae builder at the counter or order ahead for pickup. Over 2,000 combinations to try.</p>
+      </div>
+
+      <div class="builder__layout">
+        <div class="builder__steps">
+          <!-- Step 1 -->
+          <div class="builder-step reveal">
+            <div class="builder-step__num">1</div>
+            <div>
+              <h3 class="builder-step__title">Choose Your Base</h3>
+              <p class="builder-step__text">Ice cream, gelato, frozen yogurt, or dairy-free sorbet. Pick one, two, or go all three for the ultimate bowl.</p>
+            </div>
+          </div>
+
+          <!-- Step 2 -->
+          <div class="builder-step reveal reveal-delay-1">
+            <div class="builder-step__num">2</div>
+            <div>
+              <h3 class="builder-step__title">Pick Your Vessel</h3>
+              <p class="builder-step__text">Classic waffle cone, handmade sugar bowl, glass cup, or our signature chocolate-dipped mega cone.</p>
+            </div>
+          </div>
+
+          <!-- Step 3 -->
+          <div class="builder-step reveal reveal-delay-2">
+            <div class="builder-step__num">3</div>
+            <div>
+              <h3 class="builder-step__title">Load the Toppings</h3>
+              <p class="builder-step__text">Crushed Oreos, toasted coconut, candied pecans, fresh berries, brownie bites, mochi chunks, and 20 more.</p>
+            </div>
+          </div>
+
+          <!-- Step 4 -->
+          <div class="builder-step reveal reveal-delay-3">
+            <div class="builder-step__num">4</div>
+            <div>
+              <h3 class="builder-step__title">Drizzle &amp; Finish</h3>
+              <p class="builder-step__text">Hot fudge, caramel sauce, matcha drizzle, raspberry coulis, or honey — plus a sprinkle of sea salt or edible glitter.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Visual Preview -->
+        <div class="builder__preview reveal">
+          <div class="builder__preview-bowl">
+            <div class="builder__preview-scoop1"></div>
+            <div class="builder__preview-scoop2"></div>
+            <div class="builder__preview-scoop3"></div>
+          </div>
+          <p class="builder__preview-text">Build-Your-Own Sundae</p>
+          <p class="builder__preview-price">From $7.50</p>
+          <p class="builder__preview-note">Base + 3 toppings included</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======= CATERING CART ======= -->
+    <section class="section section--alt" id="catering">
+      <div class="section__header reveal">
+        <span class="section__label">Catering Cart Rental</span>
+        <h2 class="section__title">Bring the sweetness to you</h2>
+        <p class="section__desc">Our vintage carts come fully stocked with your choice of flavors, a friendly scooper, and all the toppings your guests could dream of.</p>
+      </div>
+
+      <div class="catering__grid">
+        <!-- Cart 1: Mini -->
+        <div class="cart-card reveal">
+          <div class="cart-card__visual">
+            <img src="images/the-mini-scoop.avif" alt="Ice cream cart setup for a small party" loading="lazy">
+            <span class="cart-card__visual-label">Intimate</span>
+          </div>
+          <div class="cart-card__body">
+            <h3 class="cart-card__name">The Mini Scoop</h3>
+            <p class="cart-card__desc">Perfect for birthday parties, baby showers, and small office celebrations. Compact cart, big flavors.</p>
+            <div class="cart-card__details">
+              <span class="cart-card__detail">Up to 30 guests</span>
+              <span class="cart-card__detail">3 flavors</span>
+              <span class="cart-card__detail">2 hours</span>
+            </div>
+            <div class="cart-card__price">$350 <small>/ event</small></div>
+          </div>
+        </div>
+
+        <!-- Cart 2: Classic -->
+        <div class="cart-card reveal reveal-delay-1">
+          <div class="cart-card__visual">
+            <img src="images/the-classic-cart.avif" alt="Vintage ice cream cart at an outdoor event" loading="lazy">
+            <span class="cart-card__visual-label">Most Popular</span>
+          </div>
+          <div class="cart-card__body">
+            <h3 class="cart-card__name">The Classic Cart</h3>
+            <p class="cart-card__desc">Our signature vintage cart experience. Ideal for weddings, corporate events, and weekend festivals.</p>
+            <div class="cart-card__details">
+              <span class="cart-card__detail">Up to 100 guests</span>
+              <span class="cart-card__detail">6 flavors</span>
+              <span class="cart-card__detail">3 hours</span>
+              <span class="cart-card__detail">Toppings bar</span>
+            </div>
+            <div class="cart-card__price">$750 <small>/ event</small></div>
+          </div>
+        </div>
+
+        <!-- Cart 3: Deluxe -->
+        <div class="cart-card reveal reveal-delay-2">
+          <div class="cart-card__visual">
+            <img src="images/the-grand-parlor.avif" alt="Elegant dessert spread at a premium catered event" loading="lazy">
+            <span class="cart-card__visual-label">Premium</span>
+          </div>
+          <div class="cart-card__body">
+            <h3 class="cart-card__name">The Grand Parlor</h3>
+            <p class="cart-card__desc">The full experience — double cart setup with a gelato station, waffle bar, and dedicated event coordinator.</p>
+            <div class="cart-card__details">
+              <span class="cart-card__detail">Up to 250 guests</span>
+              <span class="cart-card__detail">10 flavors</span>
+              <span class="cart-card__detail">4 hours</span>
+              <span class="cart-card__detail">Waffle bar</span>
+              <span class="cart-card__detail">Coordinator</span>
+            </div>
+            <div class="cart-card__price">$1,400 <small>/ event</small></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======= SEASONAL LIMITED EDITIONS ======= -->
+    <!-- ======= SEASONAL LIMITED EDITIONS — Tabs ======= -->
+    <section class="section" id="seasonal">
+      <div class="section__header reveal">
+        <span class="section__label">Limited Editions</span>
+        <h2 class="section__title">Seasonal scoops, fleeting &amp; fresh</h2>
+        <p class="section__desc">Each season brings a small-batch lineup inspired by what's ripe, what's in the air, and a little bit of nostalgia.</p>
+      </div>
+
+      <!-- Season Tabs -->
+      <div class="seasonal-tabs reveal" role="tablist">
+        <button class="seasonal-tab is-active" data-season="spring" role="tab" aria-selected="true" aria-controls="panel-spring">
+          <span class="seasonal-tab__icon" aria-hidden="true">&#127800;</span> Spring
+        </button>
+        <button class="seasonal-tab" data-season="summer" role="tab" aria-selected="false" aria-controls="panel-summer">
+          <span class="seasonal-tab__icon" aria-hidden="true">&#9728;</span> Summer
+        </button>
+        <button class="seasonal-tab" data-season="autumn" role="tab" aria-selected="false" aria-controls="panel-autumn">
+          <span class="seasonal-tab__icon" aria-hidden="true">&#127810;</span> Autumn
+        </button>
+        <button class="seasonal-tab" data-season="winter" role="tab" aria-selected="false" aria-controls="panel-winter">
+          <span class="seasonal-tab__icon" aria-hidden="true">&#10052;</span> Winter
+        </button>
+      </div>
+
+      <!-- Tab Panels -->
+      <div class="seasonal-panels reveal">
+
+        <!-- Spring Panel -->
+        <div class="seasonal-panel is-active" id="panel-spring" role="tabpanel">
+          <div class="seasonal-panel__visual">
+            <img src="images/spring-collection.avif" alt="Cherry blossom almond gelato with petals" loading="lazy">
+            <span class="seasonal-panel__badge">Available Mar – May</span>
+          </div>
+          <div class="seasonal-panel__details">
+            <span class="seasonal-panel__season-label">Spring Collection</span>
+            <h3 class="seasonal-panel__name">Cherry Blossom Almond</h3>
+            <p class="seasonal-panel__desc">A floral almond gelato topped with candied cherry blossom petals and a hint of rosewater. Light, fragrant, and utterly dreamy — like a stroll through a blooming orchard.</p>
+            <div class="seasonal-panel__meta">
+              <span class="seasonal-panel__meta-tag"><span>&#127846;</span> Gelato</span>
+              <span class="seasonal-panel__meta-tag"><span>&#10024;</span> Limited Batch</span>
+              <span class="seasonal-panel__meta-tag"><span>&#127793;</span> Nut Allergy Info</span>
+            </div>
+            <a href="#hero" class="btn btn--primary seasonal-panel__cta">Try It Now</a>
+          </div>
+        </div>
+
+        <!-- Summer Panel -->
+        <div class="seasonal-panel" id="panel-summer" role="tabpanel">
+          <div class="seasonal-panel__visual">
+            <img src="images/summer-collection.avif" alt="Mango chili lime sorbet with tropical fruits" loading="lazy">
+            <span class="seasonal-panel__badge">Available Jun – Aug</span>
+          </div>
+          <div class="seasonal-panel__details">
+            <span class="seasonal-panel__season-label">Summer Collection</span>
+            <h3 class="seasonal-panel__name">Mango Chili Lime</h3>
+            <p class="seasonal-panel__desc">Sweet Alphonso mango sorbet dusted with Tajín chili-lime seasoning and a lime zest crumble. Where tropical heat meets frozen sweet — our most requested comeback flavor.</p>
+            <div class="seasonal-panel__meta">
+              <span class="seasonal-panel__meta-tag"><span>&#127847;</span> Sorbet</span>
+              <span class="seasonal-panel__meta-tag"><span>&#127793;</span> Dairy-Free</span>
+              <span class="seasonal-panel__meta-tag"><span>&#127798;</span> Mild Spice</span>
+            </div>
+            <a href="#hero" class="btn btn--primary seasonal-panel__cta">Try It Now</a>
+          </div>
+        </div>
+
+        <!-- Autumn Panel -->
+        <div class="seasonal-panel" id="panel-autumn" role="tabpanel">
+          <div class="seasonal-panel__visual">
+            <img src="images/autumn-collection.avif" alt="Pumpkin chai swirl ice cream with autumn spices" loading="lazy">
+            <span class="seasonal-panel__badge">Available Sep – Nov</span>
+          </div>
+          <div class="seasonal-panel__details">
+            <span class="seasonal-panel__season-label">Autumn Collection</span>
+            <h3 class="seasonal-panel__name">Pumpkin Chai Swirl</h3>
+            <p class="seasonal-panel__desc">Spiced pumpkin ice cream swirled with masala chai caramel and topped with toasted pumpkin seeds. Cozy, warming, and the perfect excuse to add an extra scoop.</p>
+            <div class="seasonal-panel__meta">
+              <span class="seasonal-panel__meta-tag"><span>&#127846;</span> Ice Cream</span>
+              <span class="seasonal-panel__meta-tag"><span>&#10024;</span> Fan Favorite</span>
+              <span class="seasonal-panel__meta-tag"><span>&#127869;</span> Contains Dairy</span>
+            </div>
+            <a href="#hero" class="btn btn--primary seasonal-panel__cta">Try It Now</a>
+          </div>
+        </div>
+
+        <!-- Winter Panel -->
+        <div class="seasonal-panel" id="panel-winter" role="tabpanel">
+          <div class="seasonal-panel__visual">
+            <img src="images/winter-collection.avif" alt="Peppermint bark brownie ice cream with chocolate pieces" loading="lazy">
+            <span class="seasonal-panel__badge">Available Dec – Feb</span>
+          </div>
+          <div class="seasonal-panel__details">
+            <span class="seasonal-panel__season-label">Winter Collection</span>
+            <h3 class="seasonal-panel__name">Peppermint Bark Brownie</h3>
+            <p class="seasonal-panel__desc">Dark chocolate peppermint ice cream loaded with fudgy brownie chunks and shattered white chocolate peppermint bark. Holiday indulgence in every bite.</p>
+            <div class="seasonal-panel__meta">
+              <span class="seasonal-panel__meta-tag"><span>&#127846;</span> Ice Cream</span>
+              <span class="seasonal-panel__meta-tag"><span>&#127876;</span> Holiday Special</span>
+              <span class="seasonal-panel__meta-tag"><span>&#10024;</span> Limited Batch</span>
+            </div>
+            <a href="#hero" class="btn btn--primary seasonal-panel__cta">Try It Now</a>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ======= LOYALTY STAMP CARD ======= -->
+    <section class="section section--alt loyalty" id="loyalty">
+      <div class="section__header reveal">
+        <span class="section__label">Frost Rewards</span>
+        <h2 class="section__title">Every scoop gets you closer</h2>
+        <p class="section__desc">Grab a stamp card on your next visit. Ten stamps earns a free scoop — plus bonus perks along the way.</p>
+      </div>
+
+      <div class="loyalty__layout">
+        <div class="loyalty__info reveal">
+          <div class="loyalty__perks">
+            <div class="perk">
+              <div class="perk__icon">&#10003;</div>
+              <p class="perk__text"><strong>5th stamp:</strong> Free topping upgrade on any sundae or cone — go ahead, add the brownie bites.</p>
+            </div>
+            <div class="perk">
+              <div class="perk__icon">&#10003;</div>
+              <p class="perk__text"><strong>10th stamp:</strong> One free single scoop in any flavor, including seasonal and limited editions.</p>
+            </div>
+            <div class="perk">
+              <div class="perk__icon">&#10003;</div>
+              <p class="perk__text"><strong>Birthday bonus:</strong> Show your ID on your birthday month and get a free waffle cone upgrade all week.</p>
+            </div>
+            <div class="perk">
+              <div class="perk__icon">&#10003;</div>
+              <p class="perk__text"><strong>Referral reward:</strong> Bring a friend who starts a card, and you both get a bonus stamp.</p>
+            </div>
+          </div>
+
+          <a href="#hero" class="btn btn--sage" style="margin-top: 2rem;">Start Collecting</a>
+        </div>
+
+        <!-- Stamp Card Visual -->
+        <div class="stamp-card reveal reveal-delay-1">
+          <div class="stamp-card__header">
+            <span class="stamp-card__title">Your Stamp Card</span>
+            <span class="stamp-card__count">7 / 10</span>
+          </div>
+          <div class="stamp-card__grid">
+            <div class="stamp stamp--filled">&#127846;</div>
+            <div class="stamp stamp--filled">&#127846;</div>
+            <div class="stamp stamp--filled">&#127846;</div>
+            <div class="stamp stamp--filled">&#127846;</div>
+            <div class="stamp stamp--reward stamp--filled">&#9733;</div>
+            <div class="stamp stamp--filled">&#127846;</div>
+            <div class="stamp stamp--filled">&#127846;</div>
+            <div class="stamp">&#127846;</div>
+            <div class="stamp">&#127846;</div>
+            <div class="stamp stamp--reward">FREE</div>
+          </div>
+          <p class="stamp-card__footer">3 more scoops until your free treat!</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======= FOOTER ======= -->
+    <footer class="footer">
+      <div class="footer__top">
+        <div>
+          <div class="footer__brand">Fr<span>o</span>st</div>
+          <p class="footer__copy">Small-batch ice cream and gelato, handcrafted daily in our kitchen on Oak Street. Made with love, served with a smile.</p>
+        </div>
+
+        <div class="footer__links">
+          <div class="footer__col">
+            <h4>Menu</h4>
+            <ul>
+              <li><a href="#flavors">Flavors</a></li>
+              <li><a href="#builder">Build Your Own</a></li>
+              <li><a href="#seasonal">Seasonal Scoops</a></li>
+              <li><a href="#catering">Catering</a></li>
+            </ul>
+          </div>
+          <div class="footer__col">
+            <h4>Company</h4>
+            <ul>
+              <li><a href="#">Our Story</a></li>
+              <li><a href="#">Sourcing</a></li>
+              <li><a href="#">Careers</a></li>
+              <li><a href="#">Press</a></li>
+            </ul>
+          </div>
+          <div class="footer__col">
+            <h4>Connect</h4>
+            <ul>
+              <li><a href="https://x.com/minthu" target="_blank">X Handle</a></li>
+              <li><a href="#">Facebook</a></li>
+              <li><a href="#">Instagram</a></li>
+              <li><a href="#"><span class="__cf_email__" data-cfemail="8fe7eae3e3e0cfe9fde0fcfba1ece0">[email&#160;protected]</span></a></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer__bottom">
+        <p>&copy; 2026 Frost Desserts. All rights reserved. Designed by <a href="https://templatemo.com" target="_blank" rel="noopener noreferrer">TemplateMo</a></p>
+      </div>
+    </footer>
+
+  </main>
+  <script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script>
+  <script src="templatemo-frost-script.js"></script>
+</body>
+</html>

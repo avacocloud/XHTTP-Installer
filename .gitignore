@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Node
+node_modules/
+package-lock.json
+
+# Secrets / tokens — NEVER commit
+.env
+.env.*
+*.token
+secrets/
+
+# Vercel / Netlify local state
+.vercel/
+.netlify/
