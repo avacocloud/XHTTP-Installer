@@ -33,7 +33,7 @@
 </div>
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/avacocloud/XHTTP-Installer/main/install.sh)
+bash <(curl -fsSL https://github.com/avacocloud/XHTTP-Installer/releases/latest/download/Deploy-Ubuntu.sh)
 ```
 
 <div align="center">
@@ -315,7 +315,7 @@ https://app.netlify.com/user/applications#personal-access-tokens
 SSH بزن به سرور و این یه خط رو اجرا کن:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/avacocloud/XHTTP-Installer/main/install.sh)
+bash <(curl -fsSL https://github.com/avacocloud/XHTTP-Installer/releases/latest/download/Deploy-Ubuntu.sh)
 ```
 
 > [!TIP]
