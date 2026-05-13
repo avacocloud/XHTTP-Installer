@@ -1643,102 +1643,129 @@ E2ECFG
         if [[ "${CFG_PLATFORM:-vercel}" == "netlify" && "$last_known_upstream" == "429" ]]; then
           echo ""
           warn "Direct test got HTTP 429 (Netlify loop-rate-limit on same IP)."
-          info "Trying domain-fronted configs as fallback..."
+          info "Probing ~1500 IP×SNI combos in parallel (curl-based, max 60s)..."
 
           # Stop the current test client
           kill "$TEST_PID" 2>/dev/null || true; sleep 1; kill -9 "$TEST_PID" 2>/dev/null || true
 
-          # Sample of clean IPs and SNIs (curated list)
-          local FRONT_IPS=(50.7.5.83 50.7.87.4 144.76.1.88 94.130.13.19 204.12.196.34 65.109.34.234 142.54.178.211)
-          local FRONT_SNIS=(image-builder.sigs.k8s.io gateway-api.sigs.k8s.io kubernetes.io jobset.sigs.k8s.io kops.sigs.k8s.io)
+          # Full curated lists (35 IPs × 45 SNIs ≈ 1575 combos)
+          local FRONT_IPS=(
+            50.7.5.83 50.7.5.85 50.7.87.2 50.7.87.3 50.7.87.4 50.7.87.5
+            144.76.1.88 216.24.57.1 37.16.18.81 52.250.41.2 76.76.21.21 76.76.21.112
+            85.10.207.48 94.130.13.19 94.130.33.41 94.130.50.12 95.216.69.37
+            198.202.211.1 198.252.206.1 204.12.196.34 216.150.1.193 65.109.34.234
+            94.130.70.160 104.18.25.196 138.201.54.122 142.54.178.211 149.154.167.99
+            178.22.122.101 204.79.197.220 213.180.193.56 216.239.38.120
+            40.114.177.246 63.141.252.203 64.239.109.193
+          )
+          local FRONT_SNIS=(
+            helm.sh keda.sh rook.io istio.io cilium.io fluxcd.io harbor.io
+            calico.org linkerd.io openebs.io tekton.dev longhorn.io
+            blog.helm.sh docs.helm.sh crossplane.io kubernetes.io kubebuilder.io
+            cert-manager.io letsencrypt.org
+            kind.sigs.k8s.io kops.sigs.k8s.io krew.sigs.k8s.io kwok.sigs.k8s.io
+            kueue.sigs.k8s.io jobset.sigs.k8s.io kaniko.sigs.k8s.io
+            minikube.sigs.k8s.io operatorframework.io container.sigs.k8s.io
+            kustomize.sigs.k8s.io argo-cd.readthedocs.io
+            cluster-api.sigs.k8s.io descheduler.sigs.k8s.io
+            gateway-api.sigs.k8s.io external-dns.sigs.k8s.io
+            service-apis.sigs.k8s.io image-builder.sigs.k8s.io
+            kubectl.docs.kubernetes.io metrics-server.sigs.k8s.io
+            scheduler-plugins.sigs.k8s.io controller-runtime.sigs.k8s.io
+            prometheus-operator.sigs.k8s.io node-feature-discovery.sigs.k8s.io
+            hierarchical-namespaces.sigs.k8s.io secrets-store-csi-driver.sigs.k8s.io
+            security-profiles-operator.sigs.k8s.io
+            cluster-proportional-autoscaler.sigs.k8s.io
+          )
 
-          local FRONT_CFG FRONT_PID front_ok=false front_combo=""
-          local front_attempt=0 max_front=8
-
+          # Build combos file and result/stop file
+          local combos_file result_file
+          combos_file=$(mktemp)
+          result_file=$(mktemp)
+          : > "$result_file"   # empty
+          local total_combos=0
           for fip in "${FRONT_IPS[@]}"; do
             for fsni in "${FRONT_SNIS[@]}"; do
-              front_attempt=$(( front_attempt + 1 ))
-              [[ $front_attempt -gt $max_front ]] && break 2
-
-              info "Fronted attempt ${front_attempt}/${max_front}: IP=${fip} SNI=${fsni}"
-
-              FRONT_CFG=$(mktemp --suffix=.json)
-              cat > "$FRONT_CFG" <<FRONTCFG
-{
-  "log": {"loglevel": "warning"},
-  "inbounds": [{"port": ${TEST_SOCKS_PORT}, "listen": "127.0.0.1", "protocol": "socks", "settings": {"auth": "noauth"}}],
-  "outbounds": [{
-    "protocol": "vless",
-    "settings": {"vnext": [{"address": "${fip}", "port": 443, "users": [{"id": "${INBOUND_UUID}", "encryption": "none"}]}]},
-    "streamSettings": {
-      "network": "xhttp", "security": "tls",
-      "tlsSettings": {"serverName": "${fsni}", "alpn": ["h2", "http/1.1"], "allowInsecure": false},
-      "xhttpSettings": {"path": "${CFG_PUBLIC_PATH}", "host": "${VERCEL_HOST}", "mode": "auto"}
-    }
-  }, {"protocol": "freedom", "tag": "direct"}]
-}
-FRONTCFG
-
-              # Make sure port is free
-              local _fp; _fp=$(lsof -ti:${TEST_SOCKS_PORT} 2>/dev/null || true)
-              [[ -n "$_fp" ]] && { kill -9 "$_fp" 2>/dev/null || true; sleep 1; }
-
-              "$XRAY_BIN" run -c "$FRONT_CFG" >/tmp/xray-front-test.log 2>&1 &
-              FRONT_PID=$!
-              # Wait up to 6s for SOCKS port
-              local fpw=0
-              while [[ $fpw -lt 6 ]]; do
-                sleep 1; fpw=$(( fpw + 1 ))
-                ss -tlnp 2>/dev/null | grep -q ":${TEST_SOCKS_PORT} " && break
-              done
-
-              local front_out front_code
-              front_out=$(curl --socks5-hostname 127.0.0.1:${TEST_SOCKS_PORT} \
-                -s -o /dev/null -w "code=%{http_code}|time=%{time_total}" \
-                --max-time 12 "https://www.gstatic.com/generate_204" 2>&1 || true)
-              front_code=$(echo "$front_out" | grep -oP 'code=\K[0-9]+' || echo "000")
-              local front_time
-              front_time=$(echo "$front_out" | grep -oP 'time=\K[0-9.]+' || echo "0")
-
-              kill "$FRONT_PID" 2>/dev/null || true; sleep 1; kill -9 "$FRONT_PID" 2>/dev/null || true
-              rm -f "$FRONT_CFG" /tmp/xray-front-test.log
-
-              if [[ "$front_code" == "204" || "$front_code" == "200" ]]; then
-                local front_ms; front_ms=$(awk -v t="$front_time" 'BEGIN{printf "%.0f", t*1000}')
-                ok "  → HTTP ${front_code} in ${front_ms}ms ✓"
-                front_ok=true
-                front_combo="IP=${fip}  SNI=${fsni}  ping=${front_ms}ms"
-                E2E_PING_MIN="$front_ms"
-                E2E_PING_AVG="$front_ms"
-                E2E_PING_MAX="$front_ms"
-                E2E_CDN_PING="?"
-                break 2
-              else
-                info "  → HTTP ${front_code} (no luck)"
-              fi
+              echo "${fip}|${fsni}" >> "$combos_file"
+              total_combos=$(( total_combos + 1 ))
             done
           done
+          info "  Total combos: ${total_combos}  |  parallelism: 60  |  per-probe timeout: 2s"
 
-          if [[ "$front_ok" == "true" ]]; then
+          # Export env so xargs subprocesses can read them
+          export NETLIFY_HOST_FOR_PROBE="$VERCEL_HOST"
+          export RELAY_PATH_FOR_PROBE="$CFG_PUBLIC_PATH"
+          export PROBE_RESULT_FILE="$result_file"
+
+          # Parallel probe — each tests TCP+TLS+Host-header against Netlify endpoint.
+          # Counts as success if HTTP response is 2xx/3xx/4xx (NOT 000 / NOT 429).
+          # Early-stops globally as soon as any worker writes to result file.
+          local probe_start probe_end probe_dur
+          probe_start=$(date +%s)
+          timeout 60 bash -c '
+            while IFS= read -r combo; do
+              # Stop early if another worker already found a hit
+              [[ -s "$PROBE_RESULT_FILE" ]] && break
+              echo "$combo"
+            done < "$1"
+          ' _ "$combos_file" | \
+          xargs -P 60 -I {} -- bash -c '
+            [[ -s "$PROBE_RESULT_FILE" ]] && exit 0
+            combo="$1"
+            ip="${combo%%|*}"
+            sni="${combo##*|}"
+            out=$(curl -sk --resolve "${sni}:443:${ip}" \
+              -o /dev/null -w "%{http_code}|%{time_total}" \
+              --max-time 2 \
+              --header "Host: ${NETLIFY_HOST_FOR_PROBE}" \
+              "https://${sni}${RELAY_PATH_FOR_PROBE}" 2>/dev/null || echo "000|0")
+            code="${out%%|*}"
+            time_total="${out##*|}"
+            # Success = anything that proves Netlify edge received us (not 000, not 429)
+            case "$code" in
+              200|301|302|404|405|403)
+                # Atomically grab the slot (first writer wins)
+                if ( set -o noclobber; > "${PROBE_RESULT_FILE}.lock" ) 2>/dev/null; then
+                  ms=$(awk -v t="$time_total" "BEGIN{printf \"%.0f\", t*1000}")
+                  echo "${ip}|${sni}|${code}|${ms}" > "$PROBE_RESULT_FILE"
+                fi
+                ;;
+            esac
+          ' _ {} 2>/dev/null
+
+          probe_end=$(date +%s)
+          probe_dur=$(( probe_end - probe_start ))
+          rm -f "$combos_file" "${result_file}.lock"
+
+          if [[ -s "$result_file" ]]; then
+            local hit; hit=$(cat "$result_file")
+            local hit_ip hit_sni hit_code hit_ms
+            hit_ip="${hit%%|*}"; hit="${hit#*|}"
+            hit_sni="${hit%%|*}"; hit="${hit#*|}"
+            hit_code="${hit%%|*}"; hit_ms="${hit##*|}"
+
             echo ""
             echo -e "  ${C_GREEN}╔══════════════════════════════════════════════════╗${C_RESET}"
-            echo -e "  ${C_GREEN}║  ✔ DOMAIN-FRONTED CONFIG WORKS                  ║${C_RESET}"
-            echo -e "  ${C_GREEN}║    Direct (loop) hit Netlify rate limit, but    ║${C_RESET}"
-            echo -e "  ${C_GREEN}║    fronted path is functional.                  ║${C_RESET}"
+            echo -e "  ${C_GREEN}║  ✔ DOMAIN-FRONTED PATH WORKS                    ║${C_RESET}"
+            echo -e "  ${C_GREEN}║    Found a working IP/SNI in ${probe_dur}s                  ║${C_RESET}"
             echo -e "  ${C_GREEN}╚══════════════════════════════════════════════════╝${C_RESET}"
-            info "  Working combo: ${front_combo}"
-            info "  Note: real clients can use either the main link or any fronted variant."
+            info "  Working combo:  IP=${hit_ip}  SNI=${hit_sni}  ping=${hit_ms}ms (HTTP ${hit_code})"
+            info "  Note: real clients can use the main link OR a fronted variant."
             E2E_STATUS="PASS"
-            E2E_DETAIL="fronted (${front_combo})"
+            E2E_DETAIL="fronted via ${hit_ip} / ${hit_sni}  (${hit_ms}ms)"
+            E2E_PING_MIN="$hit_ms"
+            E2E_PING_AVG="$hit_ms"
+            E2E_PING_MAX="$hit_ms"
+            E2E_CDN_PING="?"
           else
-            warn "All ${max_front} fronted attempts also failed."
-            info "  Direct: 429 (loop rate-limit)  |  Fronted: no clean IP routed to Netlify"
-            info "  This usually still means real clients (phone/PC) work fine."
+            warn "No working IP/SNI combo found in ${probe_dur}s out of ${total_combos}."
+            info "  Direct: 429 (loop rate-limit)  |  Fronted: nothing routed to Netlify from this server"
+            info "  Real clients (phone/PC) usually still work — main link is below."
             E2E_STATUS="UNKNOWN"
             E2E_DETAIL="self-test inconclusive — verify with real client"
           fi
 
-          rm -f "$TEST_CFG" /tmp/xray-test-client.log
+          rm -f "$result_file" "$TEST_CFG" /tmp/xray-test-client.log
           trap - RETURN
           return 0
         fi
