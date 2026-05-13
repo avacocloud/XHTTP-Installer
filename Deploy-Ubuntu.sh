@@ -1046,42 +1046,80 @@ phase4c_netlify_deploy() {
 
   # Helper: set/replace one env var via REST API (no CLI, no prompts)
   # Usage: _netlify_set_env_api KEY VALUE
+  # Tries with scopes=["functions"] first (paid plans); on 403 retries without scopes (free tier).
   _netlify_set_env_api() {
     local key="$1" value="$2"
-    local set_ok=false
     local api_base="https://api.netlify.com/api/v1/accounts/${NETLIFY_ACCOUNT_SLUG}/env"
     [[ -z "$NETLIFY_ACCOUNT_SLUG" ]] && { warn "  no account_slug — cannot use REST API"; return 1; }
 
+    # Inner: try one body shape with POST then PUT. Returns 0 on success.
+    _try_body() {
+      local body="$1"
+      # Try POST first
+      local api_out
+      api_out=$(curl -sS --max-time 20 \
+        -X POST "${api_base}?site_id=${site_id}" \
+        -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "$body" 2>&1 || true)
+      if echo "$api_out" | grep -qE "\"key\"\s*:\s*\"${key}\""; then
+        return 0
+      fi
+      # Detect 403 scope-not-allowed → caller will retry without scopes
+      if echo "$api_out" | grep -qiE "Upgrade your Netlify account to set specific scopes|scopes"; then
+        echo "__SCOPE_NOT_ALLOWED__"
+        return 1
+      fi
+      # POST failed for other reasons → try PUT
+      local single_obj="${body#[}"; single_obj="${single_obj%]}"
+      api_out=$(curl -sS --max-time 20 \
+        -X PUT "${api_base}/${key}?site_id=${site_id}" \
+        -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "$single_obj" 2>&1 || true)
+      if echo "$api_out" | grep -qE "\"key\"\s*:\s*\"${key}\""; then
+        return 0
+      fi
+      # Surface error to caller
+      echo "$api_out" | head -c 300
+      return 1
+    }
+
     # Step 1: DELETE any existing var (idempotent; 404 is fine)
-    curl -sS --max-time 15 -o /dev/null -w "%{http_code}" \
+    curl -sS --max-time 15 -o /dev/null \
       -X DELETE "${api_base}/${key}?site_id=${site_id}" \
       -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" >/dev/null 2>&1 || true
 
-    # Step 2: POST to create fresh
-    local body api_out
-    body=$(printf '[{"key":"%s","values":[{"value":"%s","context":"production"}],"scopes":["functions"]}]' "$key" "$value")
-    api_out=$(curl -sS --max-time 20 \
-      -X POST "${api_base}?site_id=${site_id}" \
-      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "$body" 2>&1 || true)
-    if echo "$api_out" | grep -qE "\"key\"\s*:\s*\"${key}\""; then
-      ok "  ${key} set via REST API"
+    # Step 2: try WITH scopes (paid plans / pro Netlify accounts)
+    local body_with_scope body_no_scope try_out
+    body_with_scope=$(printf '[{"key":"%s","values":[{"value":"%s","context":"production"}],"scopes":["functions"]}]' "$key" "$value")
+    try_out=$(_try_body "$body_with_scope" 2>&1)
+    if [[ $? -eq 0 ]]; then
+      ok "  ${key} set via REST API (with scope)"
       return 0
     fi
 
-    # Step 3: if POST failed (e.g. var still exists), try PUT to overwrite
-    api_out=$(curl -sS --max-time 20 \
-      -X PUT "${api_base}/${key}?site_id=${site_id}" \
-      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
-      -H "Content-Type: application/json" \
-      -d "{\"key\":\"${key}\",\"values\":[{\"value\":\"${value}\",\"context\":\"production\"}],\"scopes\":[\"functions\"]}" 2>&1 || true)
-    if echo "$api_out" | grep -qE "\"key\"\s*:\s*\"${key}\""; then
-      ok "  ${key} updated via REST API"
+    # Step 3: free-tier fallback — same call WITHOUT the scopes field
+    if [[ "$try_out" == *"__SCOPE_NOT_ALLOWED__"* ]] || echo "$try_out" | grep -qiE "scopes|upgrade"; then
+      info "  Account is on free tier — retrying without scopes..."
+    fi
+    body_no_scope=$(printf '[{"key":"%s","values":[{"value":"%s","context":"production"}]}]' "$key" "$value")
+    try_out=$(_try_body "$body_no_scope" 2>&1)
+    if [[ $? -eq 0 ]]; then
+      ok "  ${key} set via REST API (no scope)"
       return 0
     fi
 
-    warn "  REST API failed for ${key}. Response: $(echo "$api_out" | head -c 200)"
+    # Step 4: last resort — apply to all contexts (some accounts reject per-context)
+    local body_all
+    body_all=$(printf '[{"key":"%s","values":[{"value":"%s","context":"all"}]}]' "$key" "$value")
+    try_out=$(_try_body "$body_all" 2>&1)
+    if [[ $? -eq 0 ]]; then
+      ok "  ${key} set via REST API (context=all)"
+      return 0
+    fi
+
+    warn "  REST API failed for ${key}. Last response: $(echo "$try_out" | head -c 200)"
     return 1
   }
 
