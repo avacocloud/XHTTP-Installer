@@ -446,7 +446,11 @@ NPXWRAP
     ok "acme.sh already installed"
   else
     info "Installing acme.sh (attempt 1/2 — official)..."
+<<<<<<< HEAD
     curl -fsSL https://get.acme.sh | sh -s email=admin@example.com 2>&1 | \
+=======
+    curl -fsSL https://get.acme.sh | sh 2>&1 | \
+>>>>>>> 6b20f9d (Initial release - GPL-3.0 licensed with attribution requirement)
       grep -E "(install|Installed|OK|error|Error|success)" || true
 
     if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
@@ -2296,4 +2300,3 @@ main() {
 }
 
 main "$@"
-
