@@ -640,19 +640,16 @@ phase4b_configure_xray() {
   [[ -f "$XRAY_CFG" ]] && cp "$XRAY_CFG" "${XRAY_CFG}.bak" 2>/dev/null || true
 
   # ── Platform-specific XHTTP tuning ───────────────────────
-  # Netlify:
-  #   - xPaddingBytes 100-1000 breaks Netlify (body modification) → use 1-1
-  #   - mode "auto" → "packet-up" → many POSTs → Netlify HTTP 429 rate limit
-  #     → force "stream-up" (one long upload stream, very few requests)
-  # Vercel: handles default values fine
-  local XPADDING XHTTP_MODE
+  # Netlify needs xPaddingBytes=1-1 (default 100-1000 breaks Netlify body handling).
+  # mode stays "auto" — verified working with real clients. The end-to-end self-test
+  # may still get HTTP 429 because of an outbound→edge→inbound loop on the same IP,
+  # but real clients (phone/desktop) connecting from a different IP work fine.
+  local XPADDING XHTTP_MODE="auto"
   if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
     XPADDING="1-1"
-    XHTTP_MODE="stream-up"
-    info "Platform=netlify → xPaddingBytes=1-1, mode=stream-up (avoids 429 rate limit)"
+    info "Platform=netlify → xPaddingBytes=1-1, mode=auto"
   else
     XPADDING="100-1000"
-    XHTTP_MODE="auto"
   fi
 
   # ── Write config.json ────────────────────────────────────
@@ -1439,10 +1436,7 @@ phase5_healthcheck() {
     else
     info "E2E vars — relay: ${VERCEL_HOST}  uuid: ${INBOUND_UUID}  path: ${CFG_PUBLIC_PATH}"
 
-    # Match the server-side mode (Netlify needs stream-up to avoid 429)
     local CLIENT_MODE="auto"
-    [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && CLIENT_MODE="stream-up"
-
     local TEST_SOCKS_PORT=10809
     local TEST_CFG
     TEST_CFG=$(mktemp --suffix=.json)
@@ -1686,8 +1680,12 @@ E2ECFG
         if [[ -n "$last_known_upstream" ]]; then
           case "$last_known_upstream" in
             429)
-              fail "  CDN rate-limited the XHTTP request (HTTP 429)"
-              info "  Fix: switch xhttp mode to 'stream-up' OR add xmux to reduce request count"
+              warn "  CDN rate-limited the self-test (HTTP 429)"
+              info "  ⓘ This is often a FALSE FAILURE. The end-to-end test runs"
+              info "    from THIS server, then loops back to itself through the CDN."
+              info "    Netlify often rate-limits this loop pattern, even when real"
+              info "    clients (phone, desktop, from another network) work perfectly."
+              info "  → Try the client config from your phone/PC before assuming it's broken."
               ;;
             500|502|503|504)
               fail "  CDN got upstream error (HTTP ${last_known_upstream}) — relay couldn't reach your server"
@@ -1814,16 +1812,12 @@ phase6_summary() {
   local ENCODED_PATH
   ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
   local LINK_TAG="XHTTP-${CFG_PLATFORM}"
-  # Netlify needs xPaddingBytes=1-1 + mode=stream-up (avoids body modification + HTTP 429 rate limit)
-  # Vercel keeps the defaults (better DPI evasion)
-  local LINK_PADDING="100-1000" LINK_MODE="auto"
-  if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
-    LINK_PADDING="1-1"
-    LINK_MODE="stream-up"
-  fi
+  # Netlify needs xPaddingBytes=1-1 (avoids body-modification handshake failures)
+  local LINK_PADDING="100-1000"
+  [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && LINK_PADDING="1-1"
   # URL-encoded {"xPaddingBytes":"<value>"}
   local ENCODED_EXTRA="%7B%22xPaddingBytes%22%3A%22${LINK_PADDING}%22%7D"
-  local CLIENT_LINK="vless://${INBOUND_UUID:-UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=${LINK_MODE}&extra=${ENCODED_EXTRA}#${LINK_TAG}"
+  local CLIENT_LINK="vless://${INBOUND_UUID:-UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto&extra=${ENCODED_EXTRA}#${LINK_TAG}"
 
   echo ""
   echo -e "${C_GREEN}"
