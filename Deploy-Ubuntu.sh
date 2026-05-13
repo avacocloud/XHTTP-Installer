@@ -1433,23 +1433,42 @@ E2ECFG
     else
       ok "Test client running (PID $TEST_PID) — SOCKS port ${TEST_SOCKS_PORT} open after ${pw}s"
 
-      # Try up to 3 times with backoff (Netlify CDN propagation can take ~30s)
+      # Try up to 5 times with longer backoff (CDN propagation can take ~30-60s)
+      local max_attempts=5
       local attempt=0 probe_code="000" probe_time="0"
-      while [[ $attempt -lt 3 ]]; do
+      local upstream_status="" last_known_upstream=""
+      while [[ $attempt -lt $max_attempts ]]; do
         attempt=$(( attempt + 1 ))
-        info "VLESS handshake attempt ${attempt}/3 → https://www.gstatic.com/generate_204"
+        info "VLESS handshake attempt ${attempt}/${max_attempts} → https://www.gstatic.com/generate_204"
         local probe_out
         probe_out=$(curl --socks5-hostname 127.0.0.1:${TEST_SOCKS_PORT} \
           -s -o /dev/null \
           -w "code=%{http_code}|time=%{time_total}" \
-          --max-time 25 \
+          --max-time 30 \
           "https://www.gstatic.com/generate_204" 2>&1 || true)
         probe_code=$(echo "$probe_out" | grep -oP 'code=\K[0-9]+' || echo "000")
         probe_time=$(echo "$probe_out" | grep -oP 'time=\K[0-9.]+' || echo "0")
         if [[ "$probe_code" == "204" || "$probe_code" == "200" ]]; then
           break
         fi
-        [[ $attempt -lt 3 ]] && { warn "Got HTTP ${probe_code} — waiting 8s for CDN propagation..."; sleep 8; }
+
+        # Sniff the most recent xray log to figure out *why* the handshake failed
+        upstream_status=$(grep -oE "unexpected status [0-9]+" /tmp/xray-test-client.log 2>/dev/null | tail -1 | grep -oE '[0-9]+$' || true)
+        [[ -n "$upstream_status" ]] && last_known_upstream="$upstream_status"
+
+        if [[ -n "$upstream_status" ]]; then
+          warn "Got HTTP ${probe_code} (CDN responded with ${upstream_status} to XHTTP request)"
+        else
+          warn "Got HTTP ${probe_code} (no response — likely connection-level block / timeout)"
+        fi
+
+        # Wait longer between attempts; CDN edge caches and rate-limit windows need time
+        if [[ $attempt -lt $max_attempts ]]; then
+          local wait_s=10
+          [[ "$upstream_status" == "429" ]] && wait_s=20   # rate-limited → wait longer
+          info "Waiting ${wait_s}s before retry..."
+          sleep "$wait_s"
+        fi
       done
 
       if [[ "$probe_code" == "204" || "$probe_code" == "200" ]]; then
@@ -1531,17 +1550,83 @@ E2ECFG
         echo ""
         echo -e "  ${C_RED}╔══════════════════════════════════════════════════╗${C_RESET}"
         echo -e "  ${C_RED}║  ✘ END-TO-END TEST FAILED                       ║${C_RESET}"
-        echo -e "  ${C_RED}║    HTTP ${probe_code:-000} after 3 attempts                  ║${C_RESET}"
+        echo -e "  ${C_RED}║    HTTP ${probe_code:-000} after ${max_attempts} attempts                ║${C_RESET}"
         echo -e "  ${C_RED}╚══════════════════════════════════════════════════╝${C_RESET}"
         echo ""
         E2E_STATUS="FAIL"
-        E2E_DETAIL="HTTP ${probe_code:-000} (3 attempts)"
-        warn "Possible causes:"
-        warn "  • Netlify CDN blocking XHTTP traffic from this server's region"
-        warn "  • UUID/path mismatch between server and relay env"
-        warn "  • Upstream xray not reachable from Netlify edge"
-        info "Test client logs (last 10 lines):"
-        tail -10 /tmp/xray-test-client.log | while read -r l; do echo -e "  ${C_GRAY}  $l${C_RESET}"; done
+        E2E_DETAIL="HTTP ${probe_code:-000} (${max_attempts} attempts)"
+
+        # ── Targeted diagnostics based on what we actually saw ──
+        echo -e "  ${C_CYAN}─── Diagnostics ───${C_RESET}"
+
+        # 1. Can the server reach the CDN at all (TCP/443 + TLS)?
+        local cdn_reachable
+        cdn_reachable=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 8 \
+          -X HEAD "https://${VERCEL_HOST}/" 2>/dev/null || echo "000")
+        if [[ "$cdn_reachable" == "000" ]]; then
+          fail "  • Cannot reach CDN at all (port 443 to ${VERCEL_HOST} blocked from server)"
+        else
+          ok "  • CDN reachable on 443 (HTTP ${cdn_reachable})"
+        fi
+
+        # 2. Is the upstream xray port (server-side) actually open from outside?
+        local upstream_reachable
+        upstream_reachable=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 8 \
+          "https://${CFG_DOMAIN}:${CFG_INBOUND_PORT}${CFG_RELAY_PATH}" 2>/dev/null || echo "000")
+        if [[ "$upstream_reachable" == "000" ]]; then
+          fail "  • Upstream xray NOT reachable on ${CFG_DOMAIN}:${CFG_INBOUND_PORT} (firewall / port-blocked)"
+        else
+          ok "  • Upstream xray reachable (HTTP ${upstream_reachable} on ${CFG_INBOUND_PORT})"
+        fi
+
+        # 3. Is xray service still alive on the server?
+        if systemctl is-active --quiet xray 2>/dev/null; then
+          ok "  • xray service is running"
+        else
+          fail "  • xray service is NOT running on this server"
+        fi
+
+        # 4. Decode what we saw at the application layer
+        echo ""
+        echo -e "  ${C_CYAN}─── Root cause analysis ───${C_RESET}"
+        if [[ -n "$last_known_upstream" ]]; then
+          case "$last_known_upstream" in
+            429)
+              fail "  CDN rate-limited the XHTTP request (HTTP 429)"
+              info "  Fix: switch xhttp mode to 'stream-up' OR add xmux to reduce request count"
+              ;;
+            500|502|503|504)
+              fail "  CDN got upstream error (HTTP ${last_known_upstream}) — relay couldn't reach your server"
+              info "  Check: TARGET_DOMAIN env on ${CFG_PLATFORM}, firewall on port ${CFG_INBOUND_PORT}, SSL cert validity"
+              ;;
+            404)
+              fail "  CDN returned 404 — path mismatch between client/server (RELAY_PATH vs PUBLIC_RELAY_PATH)"
+              ;;
+            403)
+              fail "  CDN returned 403 — request rejected (likely WAF or geo-block on relay)"
+              ;;
+            *)
+              fail "  CDN returned HTTP ${last_known_upstream} — see xray log below"
+              ;;
+          esac
+        elif [[ "$cdn_reachable" == "000" ]]; then
+          fail "  Network egress to ${VERCEL_HOST}:443 is blocked from this server"
+          info "  Fix: check provider firewall / security group / outbound rules"
+        elif [[ "$upstream_reachable" == "000" ]]; then
+          fail "  Inbound port ${CFG_INBOUND_PORT} is unreachable — CDN can't relay traffic to you"
+          info "  Fix: open port ${CFG_INBOUND_PORT} on UFW and provider firewall"
+        else
+          fail "  Handshake never completed — likely TLS / SNI mismatch or wrong UUID/path"
+          info "  Verify: client UUID matches server UUID ${INBOUND_UUID:-?}"
+          info "  Verify: client path matches server path ${CFG_RELAY_PATH}"
+        fi
+
+        # 5. Always dump xray test client log for offline inspection
+        echo ""
+        echo -e "  ${C_CYAN}─── xray test client log (last 20 lines) ───${C_RESET}"
+        tail -20 /tmp/xray-test-client.log 2>/dev/null | while read -r l; do echo -e "  ${C_GRAY}  $l${C_RESET}"; done
+        echo ""
+        info "Full xray log saved to: ${LOG_FILE}"
       fi
     fi
 
@@ -1626,171 +1711,6 @@ KNIFECFG
 }
 
 # =============================================================
-#  PHASE 5b — HYBRID CONFIGS (clean IPs / SNIs + subscription)
-# =============================================================
-phase5b_hybrid_configs() {
-  step "PHASE 5b — Hybrid configs with clean IPs × SNIs"
-
-  if [[ -z "${INBOUND_UUID:-}" || -z "${VERCEL_URL:-}" ]]; then
-    warn "Missing relay info — skipping hybrid configs"
-    return 0
-  fi
-
-  echo -e "  ${C_GRAY}Pair your proxy with clean CDN IPs and SNIs to bypass region blocks.${C_RESET}"
-  echo -e "  ${C_GRAY}Every IP × every SNI = one config. (5 IPs × 3 SNIs = 15 configs)${C_RESET}"
-  if ! confirm "Generate hybrid configs with clean IPs × SNIs?"; then
-    info "Skipping hybrid configs"
-    return 0
-  fi
-
-  # ── Collect IPs ──
-  echo ""
-  echo -e "  ${C_CYAN}[ Clean IP List ]${C_RESET}"
-  echo -e "  ${C_WHITE}Enter clean IPs — one per line. Empty line to finish.${C_RESET}"
-  echo -e "  ${C_GRAY}Examples: 50.7.87.2   104.18.32.7   141.193.213.20${C_RESET}"
-  echo ""
-  local ip_list=() ip i=1
-  while true; do
-    read -rp "$(echo -e "  ${C_WHITE}IP #${i}${C_RESET} > ")" ip
-    [[ -z "${ip// }" ]] && break
-    ip_list+=("$ip")
-    i=$(( i + 1 ))
-  done
-
-  if [[ ${#ip_list[@]} -eq 0 ]]; then
-    info "No IPs entered — skipping"
-    return 0
-  fi
-
-  # ── Collect SNIs ──
-  echo ""
-  echo -e "  ${C_CYAN}[ Clean SNI / Domain List ]${C_RESET}"
-  echo -e "  ${C_WHITE}Enter clean SNIs — one per line. Empty line to finish.${C_RESET}"
-  echo -e "  ${C_GRAY}Examples: scheduler-plugins.sigs.k8s.io   speed.cloudflare.com${C_RESET}"
-  echo ""
-  local sni_list=() sni
-  i=1
-  while true; do
-    read -rp "$(echo -e "  ${C_WHITE}SNI #${i}${C_RESET} > ")" sni
-    [[ -z "${sni// }" ]] && break
-    sni_list+=("$sni")
-    i=$(( i + 1 ))
-  done
-
-  if [[ ${#sni_list[@]} -eq 0 ]]; then
-    info "No SNIs entered — skipping"
-    return 0
-  fi
-
-  local VERCEL_HOST ENCODED_PATH
-  VERCEL_HOST=$(echo "${VERCEL_URL:-}" | sed 's|https://||; s|/.*||')
-  ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
-
-  # Build config in the exact format the user specified:
-  # vless://UUID@IP:443?encryption=none&security=tls&sni=SNI&alpn=h2%2Chttp%2F1.1
-  #   &insecure=1&allowInsecure=1&type=xhttp&host=HOST&path=PATH&mode=auto#SNI%20IP
-  _build_link() {
-    local ip="$1" sni="$2"
-    # URL-encode the SNI (safe chars stay, special chars get encoded)
-    local enc_sni
-    enc_sni=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$sni" 2>/dev/null || echo "$sni")
-    # Tag: "SNI IP" with URL-encoded space
-    local tag="${enc_sni}%20${ip}"
-    echo "vless://${INBOUND_UUID}@${ip}:443?encryption=none&security=tls&sni=${sni}&alpn=h2%2Chttp%2F1.1&insecure=1&allowInsecure=1&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto#${tag}"
-  }
-
-  # Cartesian product: every IP × every SNI
-  local -a configs=()
-  local total=0
-  for ip in "${ip_list[@]}"; do
-    for sni in "${sni_list[@]}"; do
-      configs+=("$(_build_link "$ip" "$sni")")
-      total=$(( total + 1 ))
-    done
-  done
-
-  ok "Generated ${total} configs (${#ip_list[@]} IPs × ${#sni_list[@]} SNIs)"
-
-  # Save plaintext list (one config per line)
-  local CFG_FILE="/root/xhttp-configs.txt"
-  : > "$CFG_FILE"
-  printf '%s\n' "${configs[@]}" > "$CFG_FILE"
-
-  # Generate base64 subscription content (v2ray standard)
-  local SUB_FILE="/root/xhttp-sub.txt"
-  printf '%s\n' "${configs[@]}" | base64 -w 0 2>/dev/null > "$SUB_FILE" || \
-    printf '%s\n' "${configs[@]}" | base64 | tr -d '\n' > "$SUB_FILE"
-
-  # Display configs
-  echo ""
-  echo -e "  ${C_CYAN}═══ HYBRID CONFIGS (${#configs[@]} total) ═══${C_RESET}"
-  echo ""
-  for c in "${configs[@]}"; do
-    echo -e "  ${C_YELLOW}${c}${C_RESET}"
-    echo ""
-  done
-
-  # ── Auto-upload sub to a public paste service so the user gets a real URL ──
-  info "Uploading subscription to a public paste service..."
-  local SUB_URL=""
-
-  # Try 1: 0x0.st (multipart, accepts text)
-  SUB_URL=$(curl -fsS --max-time 15 -F "file=@${SUB_FILE}" https://0x0.st 2>/dev/null | \
-            grep -oE '^https?://[^[:space:]]+' | head -1 || true)
-
-  # Try 2: paste.rs (raw POST, permanent for small files)
-  if [[ -z "$SUB_URL" ]]; then
-    SUB_URL=$(curl -fsS --max-time 15 --data-binary "@${SUB_FILE}" https://paste.rs 2>/dev/null | \
-              grep -oE '^https?://[^[:space:]]+' | head -1 || true)
-  fi
-
-  # Try 3: termbin.com (netcat — permanent)
-  if [[ -z "$SUB_URL" ]] && command -v nc &>/dev/null; then
-    SUB_URL=$(nc -q 2 -w 5 termbin.com 9999 < "${SUB_FILE}" 2>/dev/null | \
-              tr -d '\0' | grep -oE 'https?://[^[:space:]]+' | head -1 || true)
-  fi
-
-  # Try 4: transfer.sh
-  if [[ -z "$SUB_URL" ]]; then
-    SUB_URL=$(curl -fsS --max-time 15 --upload-file "${SUB_FILE}" \
-              "https://transfer.sh/xhttp-sub.txt" 2>/dev/null | \
-              grep -oE '^https?://[^[:space:]]+' | head -1 || true)
-  fi
-
-  # Display result
-  if [[ -n "$SUB_URL" ]]; then
-    HYBRID_SUB_URL="$SUB_URL"
-    echo ""
-    echo -e "  ${C_GREEN}╔══════════════════════════════════════════════════════╗${C_RESET}"
-    echo -e "  ${C_GREEN}║  ✔ SUBSCRIPTION URL READY                          ║${C_RESET}"
-    echo -e "  ${C_GREEN}╚══════════════════════════════════════════════════════╝${C_RESET}"
-    echo ""
-    echo -e "  ${C_WHITE}Paste this URL into your v2ray client's${C_RESET} ${C_YELLOW}Subscription${C_RESET} ${C_WHITE}tab:${C_RESET}"
-    echo ""
-    echo -e "  ${C_YELLOW}${SUB_URL}${C_RESET}"
-    echo ""
-    ok "All ${#configs[@]} configs are accessible from that URL"
-  else
-    warn "All paste services unreachable — using local file instead"
-    echo ""
-    echo -e "  ${C_CYAN}═══ SUBSCRIPTION (base64) ═══${C_RESET}"
-    echo ""
-    echo -e "  ${C_GRAY}$(cat "$SUB_FILE")${C_RESET}"
-    echo ""
-    echo -e "  ${C_GRAY}Manually upload ${SUB_FILE} to gist.github.com / paste.ee / etc.${C_RESET}"
-    echo ""
-  fi
-
-  echo -e "  ${C_GREEN}✔ Local backup:${C_RESET}"
-  echo -e "    ${C_WHITE}${CFG_FILE}${C_RESET} ${C_GRAY}(plain list, one config per line)${C_RESET}"
-  echo -e "    ${C_WHITE}${SUB_FILE}${C_RESET} ${C_GRAY}(base64 subscription)${C_RESET}"
-  echo ""
-
-  HYBRID_CONFIGS_GENERATED="true"
-  HYBRID_CONFIG_COUNT="${#configs[@]}"
-}
-
-# =============================================================
 #  PHASE 6 — FINAL SUMMARY
 # =============================================================
 phase6_summary() {
@@ -1857,17 +1777,6 @@ phase6_summary() {
   echo ""
   echo -e "  ${C_YELLOW}${CLIENT_LINK}${C_RESET}"
   echo ""
-
-  # Hybrid configs reminder
-  if [[ "${HYBRID_CONFIGS_GENERATED:-false}" == "true" ]]; then
-    echo -e "  ${C_CYAN}── Hybrid Configs (${HYBRID_CONFIG_COUNT:-0} total) ──${C_RESET}"
-    if [[ -n "${HYBRID_SUB_URL:-}" ]]; then
-      echo -e "  ${C_WHITE}Subscription URL :${C_RESET} ${C_YELLOW}${HYBRID_SUB_URL}${C_RESET}"
-      echo -e "  ${C_GRAY}                   (paste into v2ray Subscription tab)${C_RESET}"
-    fi
-    echo -e "  ${C_GRAY}Local backup     : /root/xhttp-configs.txt  /root/xhttp-sub.txt${C_RESET}"
-    echo ""
-  fi
 
   echo -e "  ${C_GRAY}Full install log saved to: ${LOG_FILE}${C_RESET}"
   echo -e "${C_GREEN}  ══════════════════════════════════════════════════════════${C_RESET}"
@@ -1985,7 +1894,6 @@ main() {
   autofix_and_retry "XRAYSSL" phase4b_configure_xray
   autofix_and_retry "${CFG_PLATFORM:-vercel}" phase4c_deploy
   phase5_healthcheck
-  phase5b_hybrid_configs
   phase6_summary
 }
 
