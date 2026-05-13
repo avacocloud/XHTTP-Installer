@@ -33,7 +33,7 @@
 </div>
 
 ```bash
-bash <(curl -fsSL https://github.com/avacocloud/XHTTP-Installer/releases/latest/download/Deploy-Ubuntu.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/avacocloud/XHTTP-Installer/main/install.sh)
 ```
 
 <div align="center">
