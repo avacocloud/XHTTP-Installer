@@ -1030,73 +1030,64 @@ phase4c_netlify_deploy() {
   # Wait briefly for site to be fully ready in Netlify's API
   sleep 3
 
-  # Link this dir to the site so env:set/env:list work without warnings
-  timeout 30 netlify link --id "$site_id" >/dev/null 2>&1 || true
-
-  # Set TARGET_DOMAIN with the exact syntax from the upstream README:
-  # netlify env:set KEY VALUE --scope functions --context production
-  # Success patterns: "Set environment variable", "in the * context", "added", "updated"
-  _is_set_ok() {
-    echo "$1" | grep -qiE "set environment variable|environment variable.*set|in the .* context|added|updated|saved|require a redeploy"
-  }
-
-  # ── Try CLI first (with 45s timeout to prevent hangs) ──
-  info "Trying netlify CLI env:set (45s timeout)..."
-  local set_out
-  set_out=$(timeout 45 netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" \
-    --scope functions --context production --site "$site_id" 2>&1 || true)
   local set_ok=false
-  if _is_set_ok "$set_out"; then
-    ok "TARGET_DOMAIN set via CLI (scope=functions, context=production)"
+
+  # ── PRIMARY: REST API (no interactive prompts, fast, reliable) ──
+  # CLI's env:set has an interactive overwrite prompt that hangs on existing vars.
+  info "Setting TARGET_DOMAIN via Netlify REST API..."
+
+  # Step 1: try DELETE first to remove any stale value (idempotent — ignore 404)
+  curl -sS --max-time 15 -o /dev/null \
+    -X DELETE "https://api.netlify.com/api/v1/accounts/-/env/TARGET_DOMAIN?site_id=${site_id}" \
+    -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" 2>/dev/null || true
+
+  # Step 2: CREATE the var fresh
+  local api_body api_out
+  api_body=$(printf '[{"key":"TARGET_DOMAIN","values":[{"value":"%s","context":"production"}],"scopes":["functions"]}]' "$TARGET_DOMAIN_VAL")
+  api_out=$(curl -sS --max-time 20 \
+    -X POST "https://api.netlify.com/api/v1/accounts/-/env?site_id=${site_id}" \
+    -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$api_body" 2>&1 || true)
+  if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"|"values"\s*:'; then
+    ok "TARGET_DOMAIN set via REST API"
     set_ok=true
   else
-    [[ -n "$set_out" ]] && warn "CLI env:set output: $(echo "$set_out" | head -3)"
-    # Fallback CLI: without --scope (sets all scopes)
-    info "Retrying without --scope (45s timeout)..."
-    set_out=$(timeout 45 netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" --site "$site_id" 2>&1 || true)
-    if _is_set_ok "$set_out"; then
-      ok "TARGET_DOMAIN set via CLI (all scopes)"
-      set_ok=true
-    fi
-  fi
-
-  # ── If CLI hung/failed, fall back to direct REST API call ──
-  if [[ "$set_ok" != "true" ]]; then
-    warn "CLI env:set didn't confirm — trying Netlify REST API directly..."
-    # Netlify env API: PUT /api/v1/accounts/{account}/env/{key}
-    # Simpler endpoint: POST /api/v1/sites/{site_id}/env (createSiteEnvVar)
-    local api_body
-    api_body=$(printf '[{"key":"TARGET_DOMAIN","values":[{"value":"%s","context":"production"}],"scopes":["functions"]}]' "$TARGET_DOMAIN_VAL")
-    local api_out
-    api_out=$(curl -sS --max-time 30 \
-      -X POST "https://api.netlify.com/api/v1/accounts/-/env?site_id=${site_id}" \
+    # If POST said it already exists, try PUT to update
+    api_out=$(curl -sS --max-time 20 \
+      -X PUT "https://api.netlify.com/api/v1/accounts/-/env/TARGET_DOMAIN?site_id=${site_id}" \
       -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
       -H "Content-Type: application/json" \
-      -d "$api_body" 2>&1 || true)
-    if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"|"values"\s*:'; then
-      ok "TARGET_DOMAIN set via REST API"
+      -d "{\"key\":\"TARGET_DOMAIN\",\"values\":[{\"value\":\"${TARGET_DOMAIN_VAL}\",\"context\":\"production\"}],\"scopes\":[\"functions\"]}" 2>&1 || true)
+    if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"'; then
+      ok "TARGET_DOMAIN updated via REST API"
       set_ok=true
-    else
-      # Try PATCH/PUT update if it already exists
-      api_out=$(curl -sS --max-time 30 \
-        -X PUT "https://api.netlify.com/api/v1/accounts/-/env/TARGET_DOMAIN?site_id=${site_id}" \
-        -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
-        -H "Content-Type: application/json" \
-        -d "{\"key\":\"TARGET_DOMAIN\",\"values\":[{\"value\":\"${TARGET_DOMAIN_VAL}\",\"context\":\"production\"}],\"scopes\":[\"functions\"]}" 2>&1 || true)
-      if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"'; then
-        ok "TARGET_DOMAIN updated via REST API"
-        set_ok=true
-      else
-        warn "REST API also failed — first 200 chars:"
-        echo "    $(echo "$api_out" | head -c 200)"
-      fi
     fi
   fi
 
-  # Verify (with timeout to prevent hangs)
+  # ── FALLBACK: CLI (only if REST API failed) ──
+  if [[ "$set_ok" != "true" ]]; then
+    warn "REST API didn't confirm. Output (first 200 chars):"
+    echo "    $(echo "$api_out" | head -c 200)"
+    info "Falling back to netlify CLI (stdin closed to avoid prompts)..."
+    timeout 30 netlify link --id "$site_id" </dev/null >/dev/null 2>&1 || true
+    local set_out
+    # Close stdin so any interactive prompt fails fast instead of hanging
+    set_out=$(timeout 30 netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" \
+      --scope functions --context production --site "$site_id" </dev/null 2>&1 || true)
+    if echo "$set_out" | grep -qiE "set environment variable|in the .* context|added|updated|saved"; then
+      ok "TARGET_DOMAIN set via CLI fallback"
+      set_ok=true
+    else
+      warn "CLI fallback also failed: $(echo "$set_out" | head -c 200)"
+    fi
+  fi
+
+  # Verify (REST API — fast, no hangs)
   local env_list
-  env_list=$(timeout 20 netlify env:list --site "$site_id" --plain 2>&1 || \
-             timeout 20 netlify env:list --site "$site_id" 2>&1 || true)
+  env_list=$(curl -sS --max-time 15 \
+    "https://api.netlify.com/api/v1/accounts/-/env?site_id=${site_id}" \
+    -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" 2>/dev/null || true)
   popd > /dev/null
 
   if echo "$env_list" | grep -qF "$TARGET_DOMAIN_VAL"; then
