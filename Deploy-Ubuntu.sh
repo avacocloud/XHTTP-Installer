@@ -1521,8 +1521,11 @@ E2ECFG
     else
       ok "Test client running (PID $TEST_PID) — SOCKS port ${TEST_SOCKS_PORT} open after ${pw}s"
 
-      # Try up to 5 times with longer backoff (CDN propagation can take ~30-60s)
+      # Direct VLESS test. For Netlify we do at most 1 attempt then bail out to
+      # the parallel fronted probe — direct test always 429s on the loop path
+      # so retrying is just wasted time. For Vercel we retry up to 5×.
       local max_attempts=5
+      [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && max_attempts=1
       local attempt=0 probe_code="000" probe_time="0"
       local upstream_status="" last_known_upstream=""
       while [[ $attempt -lt $max_attempts ]]; do
@@ -1532,7 +1535,7 @@ E2ECFG
         probe_out=$(curl --socks5-hostname 127.0.0.1:${TEST_SOCKS_PORT} \
           -s -o /dev/null \
           -w "code=%{http_code}|time=%{time_total}" \
-          --max-time 30 \
+          --max-time 15 \
           "https://www.gstatic.com/generate_204" 2>&1 || true)
         probe_code=$(echo "$probe_out" | grep -oP 'code=\K[0-9]+' || echo "000")
         probe_time=$(echo "$probe_out" | grep -oP 'time=\K[0-9.]+' || echo "0")
@@ -1550,12 +1553,10 @@ E2ECFG
           warn "Got HTTP ${probe_code} (no response — likely connection-level block / timeout)"
         fi
 
-        # Wait longer between attempts; CDN edge caches and rate-limit windows need time
+        # Wait shorter between attempts (only for Vercel which retries)
         if [[ $attempt -lt $max_attempts ]]; then
-          local wait_s=10
-          [[ "$upstream_status" == "429" ]] && wait_s=20   # rate-limited → wait longer
-          info "Waiting ${wait_s}s before retry..."
-          sleep "$wait_s"
+          info "Waiting 10s before retry..."
+          sleep 10
         fi
       done
 
