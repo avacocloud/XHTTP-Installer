@@ -21,7 +21,31 @@ readonly AVC_BUILD_ID="avc-7f3a92e1-2025-avacocloud"
 export AVC_BUILD_ID
 
 LOG_FILE="/tmp/xhttp-install.log"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+
+# If launched via process substitution (e.g. `bash <(curl ...)`),
+# SCRIPT_DIR points to /dev/fd/... and the deploy/ folder is missing.
+# Auto-download the full repo into /opt/xhttp-installer and re-exec from there.
+if [[ -z "$SCRIPT_DIR" || ! -d "${SCRIPT_DIR}/deploy" ]]; then
+  REPO_DIR="/opt/xhttp-installer"
+  REPO_URL="https://github.com/avacocloud/XHTTP-Installer.git"
+  echo ">> Detected remote-piped run — fetching full repo to ${REPO_DIR}..."
+  if [[ ! -d "$REPO_DIR/.git" ]]; then
+    if command -v git >/dev/null 2>&1; then
+      git clone --depth 1 "$REPO_URL" "$REPO_DIR" || {
+        echo "ERROR: git clone failed. Install git first: apt install -y git"; exit 1; }
+    else
+      apt-get update -qq && apt-get install -y -qq git 2>/dev/null
+      git clone --depth 1 "$REPO_URL" "$REPO_DIR" || {
+        echo "ERROR: git clone failed."; exit 1; }
+    fi
+  else
+    (cd "$REPO_DIR" && git pull --ff-only 2>/dev/null) || true
+  fi
+  echo ">> Re-executing from ${REPO_DIR}/Deploy-Ubuntu.sh"
+  exec bash "${REPO_DIR}/Deploy-Ubuntu.sh" "$@"
+fi
+
 VERCEL_DIR="${SCRIPT_DIR}/deploy/vercel"
 NETLIFY_DIR="${SCRIPT_DIR}/deploy/netlify"
 
