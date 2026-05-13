@@ -282,6 +282,25 @@ phase1_preflight() {
   else
     ok "Node.js $(node -v) already present"
   fi
+
+  # ── Ensure swap for low-RAM VPS (npm install -g netlify-cli OOMs on <2GB without swap)
+  local total_mem_mb swap_mb
+  total_mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+  swap_mb=$(awk '/SwapTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/null || echo 0)
+  if (( total_mem_mb < 2048 && swap_mb < 1024 )); then
+    info "Low RAM detected (${total_mem_mb} MB, swap ${swap_mb} MB) — adding 2 GB swap to prevent OOM..."
+    if [[ ! -f /swapfile ]]; then
+      fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 2>/dev/null
+      chmod 600 /swapfile 2>/dev/null
+      mkswap /swapfile >/dev/null 2>&1
+      swapon /swapfile 2>/dev/null
+      grep -q "/swapfile" /etc/fstab 2>/dev/null || echo "/swapfile none swap sw 0 0" >> /etc/fstab
+      ok "2 GB swap added at /swapfile"
+    else
+      swapon /swapfile 2>/dev/null || true
+      ok "Existing /swapfile activated"
+    fi
+  fi
 }
 
 # =============================================================
@@ -586,21 +605,24 @@ phase4a_ssl() {
   "$ACME_CMD" --register-account -m "$CFG_EMAIL" 2>&1 | grep -v "^$" || true
 
   # Issue certificate
+  # --listen-v4 forces acme.sh standalone to bind IPv4 only (avoids issues on
+  # dual-stack VPS where Let's Encrypt may try IPv6 first and the AAAA record
+  # is missing or points to a different host).
   if [[ "$port80_used" == "true" ]]; then
     # Try nginx/apache webroot if available
     if command -v nginx &>/dev/null; then
       "$ACME_CMD" --issue -d "$CFG_DOMAIN" --webroot /var/www/html \
-        --keylength ec-256 2>&1 | tail -5
+        --keylength ec-256 --listen-v4 2>&1 | tail -5
     else
       warn "Cannot free port 80 automatically. Stopping xray temporarily..."
       systemctl stop xray 2>/dev/null || true
       "$ACME_CMD" --issue -d "$CFG_DOMAIN" --standalone \
-        --keylength ec-256 2>&1 | tail -5
+        --keylength ec-256 --listen-v4 2>&1 | tail -5
       systemctl start xray 2>/dev/null || true
     fi
   else
     "$ACME_CMD" --issue -d "$CFG_DOMAIN" --standalone \
-      --keylength ec-256 2>&1 | tail -5
+      --keylength ec-256 --listen-v4 2>&1 | tail -5
   fi
 
   # Install certificate to target dir
