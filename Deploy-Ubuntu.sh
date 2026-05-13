@@ -392,23 +392,30 @@ phase2_install_all() {
   else
     info "Installing Netlify CLI..."
 
-    # Check Node version — netlify-cli needs Node 18+
+    # Check Node version — current netlify-cli needs Node >=20.12.2.
     local node_ver
-    node_ver=$(node -e "process.exit(process.versions.node.split('.')[0])" 2>/dev/null; node -e "console.log(process.versions.node.split('.')[0])" 2>/dev/null || echo "0")
-    if [[ "${node_ver:-0}" -lt 18 ]]; then
-      warn "Node.js ${node_ver} detected — netlify-cli needs 18+. Upgrading Node.js..."
+    node_ver=$(node -p "process.versions.node" 2>/dev/null || echo "0.0.0")
+    if ! node -e '
+      const [maj, min, patch] = process.versions.node.split(".").map(Number);
+      process.exit(maj > 20 || (maj === 20 && (min > 12 || (min === 12 && patch >= 2))) ? 0 : 1);
+    ' 2>/dev/null; then
+      warn "Node.js ${node_ver} detected — netlify-cli needs >=20.12.2. Upgrading Node.js..."
       curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >/dev/null 2>&1
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs 2>/dev/null
       ok "Node.js upgraded to $(node -v)"
     fi
 
     local netlify_ok=false
+    local NPM_REGISTRY="https://registry.npmjs.org/"
+    local NPM_CACHE_DIR="/tmp/xhttp-npm-cache"
+    mkdir -p "$NPM_CACHE_DIR" 2>/dev/null || true
+    npm config set registry "$NPM_REGISTRY" >/dev/null 2>&1 || true
 
     # Common npm flags to speed up installs:
     #   --no-audit / --no-fund  → skips post-install network calls
     #   --no-progress           → suppresses progress bar (much faster on slow terms)
-    #   --prefer-offline        → use cache if available
-    local NPM_FAST="--no-audit --no-fund --no-progress --prefer-offline"
+    #   --prefer-online         → refresh package metadata; avoids stale-cache ETARGET
+    local NPM_FAST="--no-audit --no-fund --no-progress --prefer-online --registry=${NPM_REGISTRY} --cache=${NPM_CACHE_DIR} --fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000 --maxsockets=3"
 
     # ── Attempt 1: fast npm global install ───────────────
     if spin "Installing Netlify CLI via npm (~30-60s)" -- \
@@ -418,9 +425,9 @@ phase2_install_all() {
 
     # ── Attempt 2: npm with lower max-old-space (low-RAM VPS) ─
     if [[ "$netlify_ok" != "true" ]]; then
-      warn "Attempt 1 failed — retrying with 512MB memory limit..."
+      warn "Attempt 1 failed — retrying with low-RAM settings..."
       if spin "Installing Netlify CLI (low-mem mode)" -- \
-           bash -c "NODE_OPTIONS='--max-old-space-size=512' npm install -g netlify-cli ${NPM_FAST}"; then
+           bash -c "NODE_OPTIONS='--max-old-space-size=384' npm install -g netlify-cli ${NPM_FAST}"; then
         command -v netlify &>/dev/null && netlify_ok=true
       fi
     fi
@@ -428,9 +435,11 @@ phase2_install_all() {
     # ── Attempt 3: npm cache clean + retry ───────────────
     if [[ "$netlify_ok" != "true" ]]; then
       warn "Attempt 2 failed — cleaning npm cache and retrying..."
-      npm cache clean --force >/dev/null 2>&1 || true
+      npm cache clean --force --cache="$NPM_CACHE_DIR" >/dev/null 2>&1 || true
+      npm view content-type@2.0.0 version --registry="$NPM_REGISTRY" >/dev/null 2>&1 || \
+        warn "npm registry metadata still looks stale; forcing official npm registry for retry."
       if spin "Installing Netlify CLI (after cache clean)" -- \
-           bash -c "npm install -g netlify-cli ${NPM_FAST}"; then
+           bash -c "NODE_OPTIONS='--max-old-space-size=384' npm install -g netlify-cli ${NPM_FAST}"; then
         command -v netlify &>/dev/null && netlify_ok=true
       fi
     fi
@@ -440,11 +449,20 @@ phase2_install_all() {
       warn "Attempt 3 failed — creating npx-based wrapper instead..."
       cat > /usr/local/bin/netlify <<'NPXWRAP'
 #!/usr/bin/env bash
-exec npx --yes netlify-cli "$@"
+exec env \
+  NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=384}" \
+  npm_config_registry="https://registry.npmjs.org/" \
+  npm_config_cache="/tmp/xhttp-npm-cache" \
+  npm_config_prefer_online=true \
+  npx --yes --package netlify-cli netlify "$@"
 NPXWRAP
       chmod +x /usr/local/bin/netlify
       # Warm up the npx cache once
-      npx --yes netlify-cli --version >/dev/null 2>&1 && netlify_ok=true || true
+      NODE_OPTIONS='--max-old-space-size=384' \
+        npm_config_registry="$NPM_REGISTRY" \
+        npm_config_cache="$NPM_CACHE_DIR" \
+        npm_config_prefer_online=true \
+        npx --yes --package netlify-cli netlify --version >/dev/null 2>&1 && netlify_ok=true || true
     fi
 
     if [[ "$netlify_ok" == "true" ]]; then
