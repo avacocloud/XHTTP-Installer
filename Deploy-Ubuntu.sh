@@ -105,7 +105,7 @@ info() { echo -e "${C_GRAY}   $1${C_RESET}"; }
 spin() {
   local label="$1"; shift
   [[ "$1" == "--" ]] && shift
-  local frames='|/-\\' i=0 start now elapsed
+  local frames='|/-\' i=0 start now elapsed
   start=$(date +%s)
 
   # Run command in background, redirect output to a log so spinner can paint
@@ -113,25 +113,28 @@ spin() {
   ( "$@" >"$logfile" 2>&1 ) &
   local pid=$!
 
+  # Real escape character (not the literal \033 backslash-zero-three-three)
+  local ESC=$'\033'
   # Hide cursor
-  printf '\033[?25l'
+  printf '%s[?25l' "$ESC"
   while kill -0 "$pid" 2>/dev/null; do
     now=$(date +%s); elapsed=$(( now - start ))
     local frame="${frames:i++%${#frames}:1}"
-    printf "\r   ${C_CYAN}${frame}${C_RESET} %s ${C_GRAY}(%ds elapsed)${C_RESET}  " "$label" "$elapsed"
+    printf '\r   %s[1;36m%s%s[0m %s %s[0;90m(%ds elapsed)%s[0m   ' \
+      "$ESC" "$frame" "$ESC" "$label" "$ESC" "$elapsed" "$ESC"
     sleep 0.2
   done
   wait "$pid"; local rc=$?
   now=$(date +%s); elapsed=$(( now - start ))
-  # Restore cursor and clear spinner line
-  printf '\r\033[K\033[?25h'
+  # Clear spinner line and restore cursor
+  printf '\r%s[2K%s[?25h' "$ESC" "$ESC"
 
   if [[ $rc -eq 0 ]]; then
-    ok "$label ${C_GRAY}(${elapsed}s)${C_RESET}"
+    echo -e "   ${C_GREEN}✔${C_RESET} ${label} ${C_GRAY}(${elapsed}s)${C_RESET}"
   else
-    fail "$label — exit ${rc} (${elapsed}s)"
-    echo -e "  ${C_GRAY}── last 10 lines of output ──${C_RESET}"
-    tail -10 "$logfile" 2>/dev/null | while IFS= read -r l; do echo -e "  ${C_GRAY}  $l${C_RESET}"; done
+    echo -e "   ${C_RED}✘${C_RESET} ${label} ${C_RED}— exit ${rc}${C_RESET} ${C_GRAY}(${elapsed}s)${C_RESET}"
+    echo -e "   ${C_GRAY}── last 10 lines of output ──${C_RESET}"
+    tail -10 "$logfile" 2>/dev/null | while IFS= read -r l; do echo -e "     ${C_GRAY}$l${C_RESET}"; done
   fi
   rm -f "$logfile"
   return $rc
@@ -386,9 +389,15 @@ phase2_install_all() {
 
     local netlify_ok=false
 
-    # ── Attempt 1: standard npm global install ───────────
-    if spin "Installing Netlify CLI via npm (~1-2min, ~100MB)" -- \
-         bash -c 'npm install -g netlify-cli --prefer-online'; then
+    # Common npm flags to speed up installs:
+    #   --no-audit / --no-fund  → skips post-install network calls
+    #   --no-progress           → suppresses progress bar (much faster on slow terms)
+    #   --prefer-offline        → use cache if available
+    local NPM_FAST="--no-audit --no-fund --no-progress --prefer-offline"
+
+    # ── Attempt 1: fast npm global install ───────────────
+    if spin "Installing Netlify CLI via npm (~30-60s)" -- \
+         bash -c "npm install -g netlify-cli ${NPM_FAST}"; then
       command -v netlify &>/dev/null && netlify_ok=true
     fi
 
@@ -396,7 +405,7 @@ phase2_install_all() {
     if [[ "$netlify_ok" != "true" ]]; then
       warn "Attempt 1 failed — retrying with 512MB memory limit..."
       if spin "Installing Netlify CLI (low-mem mode)" -- \
-           bash -c 'NODE_OPTIONS="--max-old-space-size=512" npm install -g netlify-cli'; then
+           bash -c "NODE_OPTIONS='--max-old-space-size=512' npm install -g netlify-cli ${NPM_FAST}"; then
         command -v netlify &>/dev/null && netlify_ok=true
       fi
     fi
@@ -406,7 +415,7 @@ phase2_install_all() {
       warn "Attempt 2 failed — cleaning npm cache and retrying..."
       npm cache clean --force >/dev/null 2>&1 || true
       if spin "Installing Netlify CLI (after cache clean)" -- \
-           bash -c 'npm install -g netlify-cli'; then
+           bash -c "npm install -g netlify-cli ${NPM_FAST}"; then
         command -v netlify &>/dev/null && netlify_ok=true
       fi
     fi
@@ -472,7 +481,8 @@ NPXWRAP
   if command -v vercel &>/dev/null; then
     ok "Vercel CLI already installed ($(vercel --version 2>/dev/null | head -1))"
   else
-    spin "Installing Vercel CLI via npm (~30s, ~50MB)" -- bash -c 'npm install -g vercel'
+    spin "Installing Vercel CLI via npm (~20-40s)" -- \
+      bash -c 'npm install -g vercel --no-audit --no-fund --no-progress --prefer-offline'
   fi
 
   # ── 2d. xray-knife ──────────────────────────────────────
@@ -673,26 +683,40 @@ phase4a_ssl() {
     grep -iE "register|already|account" | head -3 || true
 
   # ── Helper: run acme.sh --issue and capture full output ────
+  # $1: mode (standalone | webroot)
+  # $2: extra flags (e.g. "--force")
   _run_acme_issue() {
-    local mode="$1"  # "standalone" | "webroot"
-    info "Running: acme.sh --issue -d ${CFG_DOMAIN} --${mode} --keylength ec-256 --listen-v4"
+    local mode="$1" extra="${2:-}"
+    info "Running: acme.sh --issue -d ${CFG_DOMAIN} --${mode} --keylength ec-256 --listen-v4 ${extra}"
     local out rc
     if [[ "$mode" == "webroot" ]]; then
       mkdir -p /var/www/html
       out=$("$ACME_CMD" --issue -d "$CFG_DOMAIN" --webroot /var/www/html \
-        --keylength ec-256 --listen-v4 --server letsencrypt 2>&1) || rc=$?
+        --keylength ec-256 --listen-v4 --server letsencrypt $extra 2>&1) || rc=$?
     else
       out=$("$ACME_CMD" --issue -d "$CFG_DOMAIN" --standalone \
-        --keylength ec-256 --listen-v4 --server letsencrypt 2>&1) || rc=$?
+        --keylength ec-256 --listen-v4 --server letsencrypt $extra 2>&1) || rc=$?
     fi
     rc=${rc:-0}
+    # Save full output for later inspection
+    LAST_ACME_OUT="$out"
     # Show last 25 lines so user can see the real error
     echo "$out" | tail -25 | while IFS= read -r l; do echo -e "    ${C_GRAY}${l}${C_RESET}"; done
     return $rc
   }
 
+  # ── Check if a valid cert already exists on disk (covers both ECC and RSA) ─
+  local acme_cert_path="$HOME/.acme.sh/${CFG_DOMAIN}_ecc/${CFG_DOMAIN}.cer"
+  local acme_cert_path_rsa="$HOME/.acme.sh/${CFG_DOMAIN}/${CFG_DOMAIN}.cer"
+  if [[ -f "$acme_cert_path" ]]; then
+    info "Found existing EC cert at ${acme_cert_path} — will reuse"
+  elif [[ -f "$acme_cert_path_rsa" ]]; then
+    info "Found existing RSA cert at ${acme_cert_path_rsa} — will reuse"
+    acme_cert_path="$acme_cert_path_rsa"
+  fi
+
   # ── Issue certificate ──────────────────────────────────────
-  local issue_rc=0
+  local issue_rc=0 LAST_ACME_OUT=""
   if [[ "$port80_used" == "true" ]]; then
     if command -v nginx &>/dev/null && [[ -d /var/www/html ]]; then
       _run_acme_issue webroot || issue_rc=$?
@@ -708,8 +732,30 @@ phase4a_ssl() {
     _run_acme_issue standalone || issue_rc=$?
   fi
 
+  # ── Handle "Skipping. Next renewal time" — cert already exists & valid ───
+  # acme.sh exits 2 in this case; treat as success if the cer file is there.
+  if [[ $issue_rc -ne 0 ]] && echo "$LAST_ACME_OUT" | grep -qiE "Domains not changed|Skipping.*Next renewal"; then
+    if [[ -f "$acme_cert_path" ]]; then
+      info "acme.sh: existing cert still valid — using it as-is"
+      issue_rc=0
+    else
+      # The 'skip' message lied (no cert on disk) — force re-issue
+      warn "acme.sh says 'skip' but no cert file found — forcing re-issue with --force"
+      issue_rc=0
+      if [[ "$port80_used" == "true" ]] && ! { command -v nginx &>/dev/null && [[ -d /var/www/html ]]; }; then
+        systemctl stop xray 2>/dev/null || true
+        sleep 2
+        _run_acme_issue standalone "--force" || issue_rc=$?
+        systemctl start xray 2>/dev/null || true
+      elif [[ "$port80_used" == "true" ]]; then
+        _run_acme_issue webroot "--force" || issue_rc=$?
+      else
+        _run_acme_issue standalone "--force" || issue_rc=$?
+      fi
+    fi
+  fi
+
   # ── Verify the cert file actually exists before installcert ─
-  local acme_cert_path="$HOME/.acme.sh/${CFG_DOMAIN}_ecc/${CFG_DOMAIN}.cer"
   if [[ $issue_rc -ne 0 ]] || [[ ! -f "$acme_cert_path" ]]; then
     fail "acme.sh --issue failed (exit ${issue_rc}). No cert at ${acme_cert_path}"
     info "Common causes:"
@@ -722,12 +768,13 @@ phase4a_ssl() {
     return 1
   fi
 
-  ok "acme.sh issued certificate (ec-256)"
+  ok "acme.sh certificate ready"
 
   # ── Install certificate to target dir ──────────────────────
-  # --ecc is REQUIRED when --installcert references an EC key (matches the
-  # ${domain}_ecc directory acme.sh created during --issue).
-  "$ACME_CMD" --installcert -d "$CFG_DOMAIN" --ecc \
+  # --ecc selects the EC-key cert directory (${domain}_ecc/). Omit it for RSA.
+  local ecc_flag="--ecc"
+  [[ "$acme_cert_path" == *"${CFG_DOMAIN}/${CFG_DOMAIN}.cer" ]] && ecc_flag=""
+  "$ACME_CMD" --installcert -d "$CFG_DOMAIN" $ecc_flag \
     --cert-file     "${SSL_DIR}/cert.pem" \
     --key-file      "${SSL_KEY}" \
     --fullchain-file "${SSL_CERT}" \
