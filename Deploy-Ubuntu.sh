@@ -615,6 +615,17 @@ phase4b_configure_xray() {
   # ── Backup old config ────────────────────────────────────
   [[ -f "$XRAY_CFG" ]] && cp "$XRAY_CFG" "${XRAY_CFG}.bak" 2>/dev/null || true
 
+  # ── Determine xPaddingBytes based on platform ────────────
+  # Netlify breaks default 100-1000 byte padding → use 1-1 (effectively disabled)
+  # Vercel handles padding fine → keep default for stronger DPI evasion
+  local XPADDING
+  if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
+    XPADDING="1-1"
+    info "Platform=netlify → using xPaddingBytes=1-1 (Netlify-compatible)"
+  else
+    XPADDING="100-1000"
+  fi
+
   # ── Write config.json ────────────────────────────────────
   info "Writing Xray config → ${XRAY_CFG}"
   cat > "$XRAY_CFG" <<XRAYCFG
@@ -651,7 +662,8 @@ phase4b_configure_xray() {
         "xhttpSettings": {
           "path": "${CFG_RELAY_PATH}",
           "host": "${CFG_DOMAIN}",
-          "mode": "auto"
+          "mode": "auto",
+          "xPaddingBytes": "${XPADDING}"
         }
       }
     }
@@ -1590,6 +1602,171 @@ KNIFECFG
 }
 
 # =============================================================
+#  PHASE 5b — HYBRID CONFIGS (clean IPs / SNIs + subscription)
+# =============================================================
+phase5b_hybrid_configs() {
+  step "PHASE 5b — Hybrid configs with clean IPs × SNIs"
+
+  if [[ -z "${INBOUND_UUID:-}" || -z "${VERCEL_URL:-}" ]]; then
+    warn "Missing relay info — skipping hybrid configs"
+    return 0
+  fi
+
+  echo -e "  ${C_GRAY}Pair your proxy with clean CDN IPs and SNIs to bypass region blocks.${C_RESET}"
+  echo -e "  ${C_GRAY}Every IP × every SNI = one config. (5 IPs × 3 SNIs = 15 configs)${C_RESET}"
+  if ! confirm "Generate hybrid configs with clean IPs × SNIs?"; then
+    info "Skipping hybrid configs"
+    return 0
+  fi
+
+  # ── Collect IPs ──
+  echo ""
+  echo -e "  ${C_CYAN}[ Clean IP List ]${C_RESET}"
+  echo -e "  ${C_WHITE}Enter clean IPs — one per line. Empty line to finish.${C_RESET}"
+  echo -e "  ${C_GRAY}Examples: 50.7.87.2   104.18.32.7   141.193.213.20${C_RESET}"
+  echo ""
+  local ip_list=() ip i=1
+  while true; do
+    read -rp "$(echo -e "  ${C_WHITE}IP #${i}${C_RESET} > ")" ip
+    [[ -z "${ip// }" ]] && break
+    ip_list+=("$ip")
+    i=$(( i + 1 ))
+  done
+
+  if [[ ${#ip_list[@]} -eq 0 ]]; then
+    info "No IPs entered — skipping"
+    return 0
+  fi
+
+  # ── Collect SNIs ──
+  echo ""
+  echo -e "  ${C_CYAN}[ Clean SNI / Domain List ]${C_RESET}"
+  echo -e "  ${C_WHITE}Enter clean SNIs — one per line. Empty line to finish.${C_RESET}"
+  echo -e "  ${C_GRAY}Examples: scheduler-plugins.sigs.k8s.io   speed.cloudflare.com${C_RESET}"
+  echo ""
+  local sni_list=() sni
+  i=1
+  while true; do
+    read -rp "$(echo -e "  ${C_WHITE}SNI #${i}${C_RESET} > ")" sni
+    [[ -z "${sni// }" ]] && break
+    sni_list+=("$sni")
+    i=$(( i + 1 ))
+  done
+
+  if [[ ${#sni_list[@]} -eq 0 ]]; then
+    info "No SNIs entered — skipping"
+    return 0
+  fi
+
+  local VERCEL_HOST ENCODED_PATH
+  VERCEL_HOST=$(echo "${VERCEL_URL:-}" | sed 's|https://||; s|/.*||')
+  ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
+
+  # Build config in the exact format the user specified:
+  # vless://UUID@IP:443?encryption=none&security=tls&sni=SNI&alpn=h2%2Chttp%2F1.1
+  #   &insecure=1&allowInsecure=1&type=xhttp&host=HOST&path=PATH&mode=auto#SNI%20IP
+  _build_link() {
+    local ip="$1" sni="$2"
+    # URL-encode the SNI (safe chars stay, special chars get encoded)
+    local enc_sni
+    enc_sni=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$sni" 2>/dev/null || echo "$sni")
+    # Tag: "SNI IP" with URL-encoded space
+    local tag="${enc_sni}%20${ip}"
+    echo "vless://${INBOUND_UUID}@${ip}:443?encryption=none&security=tls&sni=${sni}&alpn=h2%2Chttp%2F1.1&insecure=1&allowInsecure=1&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto#${tag}"
+  }
+
+  # Cartesian product: every IP × every SNI
+  local -a configs=()
+  local total=0
+  for ip in "${ip_list[@]}"; do
+    for sni in "${sni_list[@]}"; do
+      configs+=("$(_build_link "$ip" "$sni")")
+      total=$(( total + 1 ))
+    done
+  done
+
+  ok "Generated ${total} configs (${#ip_list[@]} IPs × ${#sni_list[@]} SNIs)"
+
+  # Save plaintext list (one config per line)
+  local CFG_FILE="/root/xhttp-configs.txt"
+  : > "$CFG_FILE"
+  printf '%s\n' "${configs[@]}" > "$CFG_FILE"
+
+  # Generate base64 subscription content (v2ray standard)
+  local SUB_FILE="/root/xhttp-sub.txt"
+  printf '%s\n' "${configs[@]}" | base64 -w 0 2>/dev/null > "$SUB_FILE" || \
+    printf '%s\n' "${configs[@]}" | base64 | tr -d '\n' > "$SUB_FILE"
+
+  # Display configs
+  echo ""
+  echo -e "  ${C_CYAN}═══ HYBRID CONFIGS (${#configs[@]} total) ═══${C_RESET}"
+  echo ""
+  for c in "${configs[@]}"; do
+    echo -e "  ${C_YELLOW}${c}${C_RESET}"
+    echo ""
+  done
+
+  # ── Auto-upload sub to a public paste service so the user gets a real URL ──
+  info "Uploading subscription to a public paste service..."
+  local SUB_URL=""
+
+  # Try 1: 0x0.st (multipart, accepts text)
+  SUB_URL=$(curl -fsS --max-time 15 -F "file=@${SUB_FILE}" https://0x0.st 2>/dev/null | \
+            grep -oE '^https?://[^[:space:]]+' | head -1 || true)
+
+  # Try 2: paste.rs (raw POST, permanent for small files)
+  if [[ -z "$SUB_URL" ]]; then
+    SUB_URL=$(curl -fsS --max-time 15 --data-binary "@${SUB_FILE}" https://paste.rs 2>/dev/null | \
+              grep -oE '^https?://[^[:space:]]+' | head -1 || true)
+  fi
+
+  # Try 3: termbin.com (netcat — permanent)
+  if [[ -z "$SUB_URL" ]] && command -v nc &>/dev/null; then
+    SUB_URL=$(nc -q 2 -w 5 termbin.com 9999 < "${SUB_FILE}" 2>/dev/null | \
+              tr -d '\0' | grep -oE 'https?://[^[:space:]]+' | head -1 || true)
+  fi
+
+  # Try 4: transfer.sh
+  if [[ -z "$SUB_URL" ]]; then
+    SUB_URL=$(curl -fsS --max-time 15 --upload-file "${SUB_FILE}" \
+              "https://transfer.sh/xhttp-sub.txt" 2>/dev/null | \
+              grep -oE '^https?://[^[:space:]]+' | head -1 || true)
+  fi
+
+  # Display result
+  if [[ -n "$SUB_URL" ]]; then
+    HYBRID_SUB_URL="$SUB_URL"
+    echo ""
+    echo -e "  ${C_GREEN}╔══════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "  ${C_GREEN}║  ✔ SUBSCRIPTION URL READY                          ║${C_RESET}"
+    echo -e "  ${C_GREEN}╚══════════════════════════════════════════════════════╝${C_RESET}"
+    echo ""
+    echo -e "  ${C_WHITE}Paste this URL into your v2ray client's${C_RESET} ${C_YELLOW}Subscription${C_RESET} ${C_WHITE}tab:${C_RESET}"
+    echo ""
+    echo -e "  ${C_YELLOW}${SUB_URL}${C_RESET}"
+    echo ""
+    ok "All ${#configs[@]} configs are accessible from that URL"
+  else
+    warn "All paste services unreachable — using local file instead"
+    echo ""
+    echo -e "  ${C_CYAN}═══ SUBSCRIPTION (base64) ═══${C_RESET}"
+    echo ""
+    echo -e "  ${C_GRAY}$(cat "$SUB_FILE")${C_RESET}"
+    echo ""
+    echo -e "  ${C_GRAY}Manually upload ${SUB_FILE} to gist.github.com / paste.ee / etc.${C_RESET}"
+    echo ""
+  fi
+
+  echo -e "  ${C_GREEN}✔ Local backup:${C_RESET}"
+  echo -e "    ${C_WHITE}${CFG_FILE}${C_RESET} ${C_GRAY}(plain list, one config per line)${C_RESET}"
+  echo -e "    ${C_WHITE}${SUB_FILE}${C_RESET} ${C_GRAY}(base64 subscription)${C_RESET}"
+  echo ""
+
+  HYBRID_CONFIGS_GENERATED="true"
+  HYBRID_CONFIG_COUNT="${#configs[@]}"
+}
+
+# =============================================================
 #  PHASE 6 — FINAL SUMMARY
 # =============================================================
 phase6_summary() {
@@ -1599,8 +1776,13 @@ phase6_summary() {
   local ENCODED_PATH
   ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
   local LINK_TAG="XHTTP-${CFG_PLATFORM}"
-  # alpn=h2,http/1.1 for compatibility; xPaddingBytes adds traffic obfuscation
-  local CLIENT_LINK="vless://${INBOUND_UUID:-UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto&extra=%7B%22xPaddingBytes%22%3A%22100-1000%22%7D#${LINK_TAG}"
+  # xPaddingBytes: Netlify rejects/strips the default 100-1000 byte padding → use 1-1.
+  # Vercel handles padding fine → keep default 100-1000 for stronger DPI evasion.
+  local LINK_PADDING="100-1000"
+  [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && LINK_PADDING="1-1"
+  # URL-encoded {"xPaddingBytes":"<value>"}
+  local ENCODED_EXTRA="%7B%22xPaddingBytes%22%3A%22${LINK_PADDING}%22%7D"
+  local CLIENT_LINK="vless://${INBOUND_UUID:-UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto&extra=${ENCODED_EXTRA}#${LINK_TAG}"
 
   echo ""
   echo -e "${C_GREEN}"
@@ -1651,6 +1833,18 @@ phase6_summary() {
   echo ""
   echo -e "  ${C_YELLOW}${CLIENT_LINK}${C_RESET}"
   echo ""
+
+  # Hybrid configs reminder
+  if [[ "${HYBRID_CONFIGS_GENERATED:-false}" == "true" ]]; then
+    echo -e "  ${C_CYAN}── Hybrid Configs (${HYBRID_CONFIG_COUNT:-0} total) ──${C_RESET}"
+    if [[ -n "${HYBRID_SUB_URL:-}" ]]; then
+      echo -e "  ${C_WHITE}Subscription URL :${C_RESET} ${C_YELLOW}${HYBRID_SUB_URL}${C_RESET}"
+      echo -e "  ${C_GRAY}                   (paste into v2ray Subscription tab)${C_RESET}"
+    fi
+    echo -e "  ${C_GRAY}Local backup     : /root/xhttp-configs.txt  /root/xhttp-sub.txt${C_RESET}"
+    echo ""
+  fi
+
   echo -e "  ${C_GRAY}Full install log saved to: ${LOG_FILE}${C_RESET}"
   echo -e "${C_GREEN}  ══════════════════════════════════════════════════════════${C_RESET}"
   echo ""
@@ -1767,6 +1961,7 @@ main() {
   autofix_and_retry "XRAYSSL" phase4b_configure_xray
   autofix_and_retry "${CFG_PLATFORM:-vercel}" phase4c_deploy
   phase5_healthcheck
+  phase5b_hybrid_configs
   phase6_summary
 }
 
