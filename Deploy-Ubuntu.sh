@@ -1031,7 +1031,7 @@ phase4c_netlify_deploy() {
   sleep 3
 
   # Link this dir to the site so env:set/env:list work without warnings
-  netlify link --id "$site_id" >/dev/null 2>&1 || true
+  timeout 30 netlify link --id "$site_id" >/dev/null 2>&1 || true
 
   # Set TARGET_DOMAIN with the exact syntax from the upstream README:
   # netlify env:set KEY VALUE --scope functions --context production
@@ -1039,28 +1039,64 @@ phase4c_netlify_deploy() {
   _is_set_ok() {
     echo "$1" | grep -qiE "set environment variable|environment variable.*set|in the .* context|added|updated|saved|require a redeploy"
   }
+
+  # ── Try CLI first (with 45s timeout to prevent hangs) ──
+  info "Trying netlify CLI env:set (45s timeout)..."
   local set_out
-  set_out=$(netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" \
+  set_out=$(timeout 45 netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" \
     --scope functions --context production --site "$site_id" 2>&1 || true)
+  local set_ok=false
   if _is_set_ok "$set_out"; then
-    ok "TARGET_DOMAIN set on Netlify (scope=functions, context=production)"
+    ok "TARGET_DOMAIN set via CLI (scope=functions, context=production)"
+    set_ok=true
   else
-    # Empty output usually means CLI silently succeeded → try fallback to confirm
-    [[ -n "$set_out" ]] && warn "first env:set output: $(echo "$set_out" | head -3)"
-    # Fallback: without --scope (sets all scopes)
-    set_out=$(netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" --site "$site_id" 2>&1 || true)
+    [[ -n "$set_out" ]] && warn "CLI env:set output: $(echo "$set_out" | head -3)"
+    # Fallback CLI: without --scope (sets all scopes)
+    info "Retrying without --scope (45s timeout)..."
+    set_out=$(timeout 45 netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" --site "$site_id" 2>&1 || true)
     if _is_set_ok "$set_out"; then
-      ok "TARGET_DOMAIN set on Netlify (all scopes)"
-    else
-      warn "env:set unclear: $(echo "$set_out" | head -3)"
-      info "Will rely on env:list verification below..."
+      ok "TARGET_DOMAIN set via CLI (all scopes)"
+      set_ok=true
     fi
   fi
 
-  # Verify
+  # ── If CLI hung/failed, fall back to direct REST API call ──
+  if [[ "$set_ok" != "true" ]]; then
+    warn "CLI env:set didn't confirm — trying Netlify REST API directly..."
+    # Netlify env API: PUT /api/v1/accounts/{account}/env/{key}
+    # Simpler endpoint: POST /api/v1/sites/{site_id}/env (createSiteEnvVar)
+    local api_body
+    api_body=$(printf '[{"key":"TARGET_DOMAIN","values":[{"value":"%s","context":"production"}],"scopes":["functions"]}]' "$TARGET_DOMAIN_VAL")
+    local api_out
+    api_out=$(curl -sS --max-time 30 \
+      -X POST "https://api.netlify.com/api/v1/accounts/-/env?site_id=${site_id}" \
+      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "$api_body" 2>&1 || true)
+    if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"|"values"\s*:'; then
+      ok "TARGET_DOMAIN set via REST API"
+      set_ok=true
+    else
+      # Try PATCH/PUT update if it already exists
+      api_out=$(curl -sS --max-time 30 \
+        -X PUT "https://api.netlify.com/api/v1/accounts/-/env/TARGET_DOMAIN?site_id=${site_id}" \
+        -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -d "{\"key\":\"TARGET_DOMAIN\",\"values\":[{\"value\":\"${TARGET_DOMAIN_VAL}\",\"context\":\"production\"}],\"scopes\":[\"functions\"]}" 2>&1 || true)
+      if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"'; then
+        ok "TARGET_DOMAIN updated via REST API"
+        set_ok=true
+      else
+        warn "REST API also failed — first 200 chars:"
+        echo "    $(echo "$api_out" | head -c 200)"
+      fi
+    fi
+  fi
+
+  # Verify (with timeout to prevent hangs)
   local env_list
-  env_list=$(netlify env:list --site "$site_id" --plain 2>&1 || \
-             netlify env:list --site "$site_id" 2>&1 || true)
+  env_list=$(timeout 20 netlify env:list --site "$site_id" --plain 2>&1 || \
+             timeout 20 netlify env:list --site "$site_id" 2>&1 || true)
   popd > /dev/null
 
   if echo "$env_list" | grep -qF "$TARGET_DOMAIN_VAL"; then
