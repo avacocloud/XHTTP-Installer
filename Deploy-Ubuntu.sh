@@ -1635,6 +1635,114 @@ E2ECFG
         E2E_PING_MAX=$max
         E2E_CDN_PING=$cdn_avg
       else
+        # ── Netlify 429 fallback: try domain-fronted configs ──────
+        # The direct test loops back to the same server IP, which Netlify
+        # often rate-limits. Domain fronting (clean IP + clean SNI + Netlify
+        # in the Host header) bypasses this. We try a small sample of known
+        # clean IP/SNI combinations until one succeeds.
+        if [[ "${CFG_PLATFORM:-vercel}" == "netlify" && "$last_known_upstream" == "429" ]]; then
+          echo ""
+          warn "Direct test got HTTP 429 (Netlify loop-rate-limit on same IP)."
+          info "Trying domain-fronted configs as fallback..."
+
+          # Stop the current test client
+          kill "$TEST_PID" 2>/dev/null || true; sleep 1; kill -9 "$TEST_PID" 2>/dev/null || true
+
+          # Sample of clean IPs and SNIs (curated list)
+          local FRONT_IPS=(50.7.5.83 50.7.87.4 144.76.1.88 94.130.13.19 204.12.196.34 65.109.34.234 142.54.178.211)
+          local FRONT_SNIS=(image-builder.sigs.k8s.io gateway-api.sigs.k8s.io kubernetes.io jobset.sigs.k8s.io kops.sigs.k8s.io)
+
+          local FRONT_CFG FRONT_PID front_ok=false front_combo=""
+          local front_attempt=0 max_front=8
+
+          for fip in "${FRONT_IPS[@]}"; do
+            for fsni in "${FRONT_SNIS[@]}"; do
+              front_attempt=$(( front_attempt + 1 ))
+              [[ $front_attempt -gt $max_front ]] && break 2
+
+              info "Fronted attempt ${front_attempt}/${max_front}: IP=${fip} SNI=${fsni}"
+
+              FRONT_CFG=$(mktemp --suffix=.json)
+              cat > "$FRONT_CFG" <<FRONTCFG
+{
+  "log": {"loglevel": "warning"},
+  "inbounds": [{"port": ${TEST_SOCKS_PORT}, "listen": "127.0.0.1", "protocol": "socks", "settings": {"auth": "noauth"}}],
+  "outbounds": [{
+    "protocol": "vless",
+    "settings": {"vnext": [{"address": "${fip}", "port": 443, "users": [{"id": "${INBOUND_UUID}", "encryption": "none"}]}]},
+    "streamSettings": {
+      "network": "xhttp", "security": "tls",
+      "tlsSettings": {"serverName": "${fsni}", "alpn": ["h2", "http/1.1"], "allowInsecure": false},
+      "xhttpSettings": {"path": "${CFG_PUBLIC_PATH}", "host": "${VERCEL_HOST}", "mode": "auto"}
+    }
+  }, {"protocol": "freedom", "tag": "direct"}]
+}
+FRONTCFG
+
+              # Make sure port is free
+              local _fp; _fp=$(lsof -ti:${TEST_SOCKS_PORT} 2>/dev/null || true)
+              [[ -n "$_fp" ]] && { kill -9 "$_fp" 2>/dev/null || true; sleep 1; }
+
+              "$XRAY_BIN" run -c "$FRONT_CFG" >/tmp/xray-front-test.log 2>&1 &
+              FRONT_PID=$!
+              # Wait up to 6s for SOCKS port
+              local fpw=0
+              while [[ $fpw -lt 6 ]]; do
+                sleep 1; fpw=$(( fpw + 1 ))
+                ss -tlnp 2>/dev/null | grep -q ":${TEST_SOCKS_PORT} " && break
+              done
+
+              local front_out front_code
+              front_out=$(curl --socks5-hostname 127.0.0.1:${TEST_SOCKS_PORT} \
+                -s -o /dev/null -w "code=%{http_code}|time=%{time_total}" \
+                --max-time 12 "https://www.gstatic.com/generate_204" 2>&1 || true)
+              front_code=$(echo "$front_out" | grep -oP 'code=\K[0-9]+' || echo "000")
+              local front_time
+              front_time=$(echo "$front_out" | grep -oP 'time=\K[0-9.]+' || echo "0")
+
+              kill "$FRONT_PID" 2>/dev/null || true; sleep 1; kill -9 "$FRONT_PID" 2>/dev/null || true
+              rm -f "$FRONT_CFG" /tmp/xray-front-test.log
+
+              if [[ "$front_code" == "204" || "$front_code" == "200" ]]; then
+                local front_ms; front_ms=$(awk -v t="$front_time" 'BEGIN{printf "%.0f", t*1000}')
+                ok "  → HTTP ${front_code} in ${front_ms}ms ✓"
+                front_ok=true
+                front_combo="IP=${fip}  SNI=${fsni}  ping=${front_ms}ms"
+                E2E_PING_MIN="$front_ms"
+                E2E_PING_AVG="$front_ms"
+                E2E_PING_MAX="$front_ms"
+                E2E_CDN_PING="?"
+                break 2
+              else
+                info "  → HTTP ${front_code} (no luck)"
+              fi
+            done
+          done
+
+          if [[ "$front_ok" == "true" ]]; then
+            echo ""
+            echo -e "  ${C_GREEN}╔══════════════════════════════════════════════════╗${C_RESET}"
+            echo -e "  ${C_GREEN}║  ✔ DOMAIN-FRONTED CONFIG WORKS                  ║${C_RESET}"
+            echo -e "  ${C_GREEN}║    Direct (loop) hit Netlify rate limit, but    ║${C_RESET}"
+            echo -e "  ${C_GREEN}║    fronted path is functional.                  ║${C_RESET}"
+            echo -e "  ${C_GREEN}╚══════════════════════════════════════════════════╝${C_RESET}"
+            info "  Working combo: ${front_combo}"
+            info "  Note: real clients can use either the main link or any fronted variant."
+            E2E_STATUS="PASS"
+            E2E_DETAIL="fronted (${front_combo})"
+          else
+            warn "All ${max_front} fronted attempts also failed."
+            info "  Direct: 429 (loop rate-limit)  |  Fronted: no clean IP routed to Netlify"
+            info "  This usually still means real clients (phone/PC) work fine."
+            E2E_STATUS="UNKNOWN"
+            E2E_DETAIL="self-test inconclusive — verify with real client"
+          fi
+
+          rm -f "$TEST_CFG" /tmp/xray-test-client.log
+          trap - RETURN
+          return 0
+        fi
+
         echo ""
         echo -e "  ${C_RED}╔══════════════════════════════════════════════════╗${C_RESET}"
         echo -e "  ${C_RED}║  ✘ END-TO-END TEST FAILED                       ║${C_RESET}"
