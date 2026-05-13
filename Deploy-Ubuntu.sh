@@ -95,6 +95,48 @@ warn() { echo -e "${C_YELLOW}   ⚠ $1${C_RESET}"; }
 fail() { echo -e "${C_RED}   ✘ $1${C_RESET}"; }
 info() { echo -e "${C_GRAY}   $1${C_RESET}"; }
 
+# ─────────────────────────────────────────────
+#  PROGRESS HELPERS
+# ─────────────────────────────────────────────
+# Run a long command with a live spinner + elapsed-time counter so the user
+# sees progress instead of a frozen terminal. Usage:
+#   spin "Installing X" -- some_command --with args
+# Exit code of the command is preserved.
+spin() {
+  local label="$1"; shift
+  [[ "$1" == "--" ]] && shift
+  local frames='|/-\\' i=0 start now elapsed
+  start=$(date +%s)
+
+  # Run command in background, redirect output to a log so spinner can paint
+  local logfile; logfile=$(mktemp)
+  ( "$@" >"$logfile" 2>&1 ) &
+  local pid=$!
+
+  # Hide cursor
+  printf '\033[?25l'
+  while kill -0 "$pid" 2>/dev/null; do
+    now=$(date +%s); elapsed=$(( now - start ))
+    local frame="${frames:i++%${#frames}:1}"
+    printf "\r   ${C_CYAN}${frame}${C_RESET} %s ${C_GRAY}(%ds elapsed)${C_RESET}  " "$label" "$elapsed"
+    sleep 0.2
+  done
+  wait "$pid"; local rc=$?
+  now=$(date +%s); elapsed=$(( now - start ))
+  # Restore cursor and clear spinner line
+  printf '\r\033[K\033[?25h'
+
+  if [[ $rc -eq 0 ]]; then
+    ok "$label ${C_GRAY}(${elapsed}s)${C_RESET}"
+  else
+    fail "$label — exit ${rc} (${elapsed}s)"
+    echo -e "  ${C_GRAY}── last 10 lines of output ──${C_RESET}"
+    tail -10 "$logfile" 2>/dev/null | while IFS= read -r l; do echo -e "  ${C_GRAY}  $l${C_RESET}"; done
+  fi
+  rm -f "$logfile"
+  return $rc
+}
+
 read_default() {
   local prompt="$1" default="$2" val
   read -rp "$(echo -e "  ${C_WHITE}${prompt}${C_RESET} ${C_GRAY}[${default}]${C_RESET}: ")" val
@@ -266,18 +308,17 @@ phase1_preflight() {
   fi
 
   info "Updating package lists..."
-  apt-get update -qq
+  spin "Updating package lists (apt-get update)" -- bash -c 'apt-get update -qq'
 
-  info "Installing base dependencies..."
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq \
-    curl wget git socat ufw jq openssl uuid-runtime netcat-openbsd \
-    build-essential ca-certificates gnupg lsb-release dnsutils unzip lsof 2>/dev/null
-  ok "Base packages ready"
+  spin "Installing base dependencies (curl, git, jq, dig, openssl, ...)" -- bash -c '
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      curl wget git socat ufw jq openssl uuid-runtime netcat-openbsd \
+      build-essential ca-certificates gnupg lsb-release dnsutils unzip lsof
+  '
 
   if ! command -v node &>/dev/null; then
-    info "Installing Node.js LTS..."
-    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - >/dev/null 2>&1
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs 2>/dev/null
+    spin "Adding NodeSource repo" -- bash -c 'curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -'
+    spin "Installing Node.js LTS (~30s, downloading ~30MB)" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs'
     ok "Node.js $(node -v) installed"
   else
     ok "Node.js $(node -v) already present"
@@ -313,9 +354,9 @@ phase2_install_all() {
   if command -v xray &>/dev/null && xray version &>/dev/null 2>&1; then
     ok "Xray already installed ($(xray version 2>/dev/null | head -1))"
   else
-    info "Installing Xray (XTLS official)..."
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install 2>&1 | \
-      grep -E "(nfo:|nstal|done|error|Error|version)" || true
+    spin "Installing Xray (XTLS official, ~15MB)" -- bash -c '
+      bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    '
     ok "Xray installed ($(xray version 2>/dev/null | head -1))"
   fi
   systemctl enable xray 2>/dev/null || true
@@ -346,15 +387,16 @@ phase2_install_all() {
     local netlify_ok=false
 
     # ── Attempt 1: standard npm global install ───────────
-    info "Attempt 1/4: npm install -g netlify-cli..."
-    if npm install -g netlify-cli --prefer-online 2>&1 | tail -3; then
+    if spin "Installing Netlify CLI via npm (~1-2min, ~100MB)" -- \
+         bash -c 'npm install -g netlify-cli --prefer-online'; then
       command -v netlify &>/dev/null && netlify_ok=true
     fi
 
     # ── Attempt 2: npm with lower max-old-space (low-RAM VPS) ─
     if [[ "$netlify_ok" != "true" ]]; then
-      warn "Attempt 1 failed — trying with reduced memory limit (512 MB)..."
-      if NODE_OPTIONS="--max-old-space-size=512" npm install -g netlify-cli 2>&1 | tail -3; then
+      warn "Attempt 1 failed — retrying with 512MB memory limit..."
+      if spin "Installing Netlify CLI (low-mem mode)" -- \
+           bash -c 'NODE_OPTIONS="--max-old-space-size=512" npm install -g netlify-cli'; then
         command -v netlify &>/dev/null && netlify_ok=true
       fi
     fi
@@ -362,8 +404,9 @@ phase2_install_all() {
     # ── Attempt 3: npm cache clean + retry ───────────────
     if [[ "$netlify_ok" != "true" ]]; then
       warn "Attempt 2 failed — cleaning npm cache and retrying..."
-      npm cache clean --force 2>/dev/null || true
-      if npm install -g netlify-cli 2>&1 | tail -3; then
+      npm cache clean --force >/dev/null 2>&1 || true
+      if spin "Installing Netlify CLI (after cache clean)" -- \
+           bash -c 'npm install -g netlify-cli'; then
         command -v netlify &>/dev/null && netlify_ok=true
       fi
     fi
@@ -429,9 +472,7 @@ NPXWRAP
   if command -v vercel &>/dev/null; then
     ok "Vercel CLI already installed ($(vercel --version 2>/dev/null | head -1))"
   else
-    info "Installing Vercel CLI..."
-    npm install -g vercel --silent
-    ok "Vercel CLI installed"
+    spin "Installing Vercel CLI via npm (~30s, ~50MB)" -- bash -c 'npm install -g vercel'
   fi
 
   # ── 2d. xray-knife ──────────────────────────────────────
