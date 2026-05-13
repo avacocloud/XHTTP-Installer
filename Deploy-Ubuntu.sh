@@ -23,6 +23,20 @@ export AVC_BUILD_ID
 LOG_FILE="/tmp/xhttp-install.log"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
 
+drain_process_substitution_source() {
+  local source_path="${BASH_SOURCE[0]:-}"
+  case "$source_path" in
+    /dev/fd/*|/proc/*/fd/*) ;;
+    *) return 0 ;;
+  esac
+
+  # When this large script is launched as `bash <(curl ...)`, re-execing early
+  # closes Bash's script FD while curl may still be writing the rest of the file.
+  # Consume the remaining bytes first so curl exits cleanly instead of printing
+  # `curl: (23) Failure writing output to destination`.
+  cat "$source_path" >/dev/null 2>&1 || true
+}
+
 # If launched via process substitution (e.g. `bash <(curl ...)`),
 # SCRIPT_DIR points to /dev/fd/... and the deploy/ folder is missing.
 # Auto-download the full repo into /opt/xhttp-installer and re-exec from there.
@@ -43,6 +57,7 @@ if [[ -z "$SCRIPT_DIR" || ! -d "${SCRIPT_DIR}/deploy" ]]; then
     (cd "$REPO_DIR" && git pull --ff-only 2>/dev/null) || true
   fi
   echo ">> Re-executing from ${REPO_DIR}/Deploy-Ubuntu.sh"
+  drain_process_substitution_source
   exec bash "${REPO_DIR}/Deploy-Ubuntu.sh" "$@"
 fi
 
@@ -446,7 +461,7 @@ NPXWRAP
     ok "acme.sh already installed"
   else
     info "Installing acme.sh (attempt 1/2 — official)..."
-    curl -fsSL https://get.acme.sh | sh 2>&1 | \
+    curl -fsSL https://get.acme.sh | sh -s email=admin@example.com 2>&1 | \
       grep -E "(install|Installed|OK|error|Error|success)" || true
 
     if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
@@ -678,16 +693,8 @@ phase4a_ssl() {
     warn "Port 80 is in use (PID ${port80_pid:-?}) — will try webroot or temp-stop service"
   fi
 
-  # ── Register acme.sh account (force update if email changed) ──
-  # Set Let's Encrypt as default CA
-  "$ACME_CMD" --set-default-ca --server letsencrypt 2>/dev/null || true
-  
-  # Clean up any old example.com emails from previous installations
-  sed -i "s/admin@example.com/$CFG_EMAIL/g; s/my@example.com/$CFG_EMAIL/g; s/example@example.com/$CFG_EMAIL/g" \
-    ~/.acme.sh/account.conf 2>/dev/null || true
-  
-  # Force re-register with correct email (--force updates existing account)
-  "$ACME_CMD" --register-account -m "$CFG_EMAIL" --server letsencrypt --force 2>&1 | \
+  # ── Register acme.sh account (idempotent) ──────────────────
+  "$ACME_CMD" --register-account -m "$CFG_EMAIL" --server letsencrypt 2>&1 | \
     grep -iE "register|already|account" | head -3 || true
 
   # ── Helper: run acme.sh --issue and capture full output ────
@@ -2304,4 +2311,3 @@ main() {
 }
 
 main "$@"
-
