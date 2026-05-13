@@ -1,0 +1,20 @@
+{
+  "name": "xhttp-installer",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "XHTTP Installer — Auto-install VLESS+XHTTP Relay on Ubuntu with Vercel deployment",
+  "scripts": {
+    "build": "node scripts/prepare-build.mjs",
+    "build:frontend": "node scripts/prepare-build.mjs"
+  },
+  "private": true,
+  "license": "GPL-3.0",
+  "keywords": ["xhttp", "vless", "vercel", "3x-ui", "ubuntu", "relay", "installer"],
+  "author": "avaco_cloud",
+  "homepage": "https://github.com/avacocloud/XHTTP-Installer",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/avacocloud/XHTTP-Installer.git"
+  },
+  "buildId": "avc-7f3a92e1-2025-avacocloud"
+}

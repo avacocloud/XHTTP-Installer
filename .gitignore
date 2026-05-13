@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+._*
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Local build artifacts (extracted copy of the released archive)
+/XHTTP-Installer/
+XHTTP-Installer.zip
+
+# Logs
+*.log
+/tmp/
+
+# Node
+node_modules/
+package-lock.json
+
+# Secrets / tokens (must NEVER be committed)
+.env
+.env.*
+*.token
+secrets/
+
+# Vercel / Netlify local state
+.vercel/
+.netlify/

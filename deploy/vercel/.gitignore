@@ -1,0 +1,36 @@
+# Logs
+*.log
+/tmp/xhttp-install.log
+
+# Vercel
+.vercel/
+.vercel/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files
+README-Original.md
+Deploy-Windows.ps1
+Run-Deploy-Windows.bat
+
+# Temp files
+*.tmp
+*.temp
+
+# IDE & Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
