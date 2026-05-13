@@ -271,7 +271,7 @@ phase1_preflight() {
   info "Installing base dependencies..."
   DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq \
     curl wget git socat ufw jq openssl uuid-runtime netcat-openbsd \
-    build-essential ca-certificates gnupg lsb-release 2>/dev/null
+    build-essential ca-certificates gnupg lsb-release dnsutils unzip lsof 2>/dev/null
   ok "Base packages ready"
 
   if ! command -v node &>/dev/null; then
@@ -594,39 +594,99 @@ phase4a_ssl() {
   SSL_CERT="${SSL_DIR}/fullchain.pem"
   SSL_KEY="${SSL_DIR}/privkey.pem"
 
-  # Stop any service using port 80 temporarily
-  local port80_used=false
-  if ss -tlnp 2>/dev/null | grep -q ':80 '; then
-    port80_used=true
-    warn "Port 80 in use — trying webroot mode first"
+  # ── Pre-flight: verify domain resolves from THIS server ─────
+  # acme.sh validation works because Let's Encrypt resolves DNS itself, but if
+  # the server can't resolve its own domain it can't bind to the right interface
+  # and webroot/standalone won't behave correctly. Use multiple resolvers.
+  local resolved
+  resolved=$(
+    dig +short +time=3 +tries=1 "$CFG_DOMAIN" A @1.1.1.1 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+  )
+  [[ -z "$resolved" ]] && resolved=$(
+    dig +short +time=3 +tries=1 "$CFG_DOMAIN" A @8.8.8.8 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+  )
+  [[ -z "$resolved" ]] && resolved=$(
+    curl -s --max-time 5 "https://cloudflare-dns.com/dns-query?name=${CFG_DOMAIN}&type=A" \
+      -H "accept: application/dns-json" 2>/dev/null | \
+      grep -oP '"data"\s*:\s*"\K[0-9.]+' | head -1
+  )
+
+  if [[ -n "$resolved" ]]; then
+    ok "DNS resolves: ${CFG_DOMAIN} → ${resolved}"
+  else
+    warn "Could not resolve ${CFG_DOMAIN} from server (DNS check failed)."
+    warn "If you JUST created the A-record, wait 1-2 min for propagation."
+    warn "acme.sh will still try; Let's Encrypt resolves DNS independently."
   fi
 
-  # Register acme.sh account
-  "$ACME_CMD" --register-account -m "$CFG_EMAIL" 2>&1 | grep -v "^$" || true
+  # ── Stop any service using port 80 temporarily ─────────────
+  local port80_used=false port80_pid=""
+  if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+    port80_used=true
+    port80_pid=$(ss -tlnp 2>/dev/null | grep ':80 ' | grep -oP 'pid=\K[0-9]+' | head -1)
+    warn "Port 80 is in use (PID ${port80_pid:-?}) — will try webroot or temp-stop service"
+  fi
 
-  # Issue certificate
-  # --listen-v4 forces acme.sh standalone to bind IPv4 only (avoids issues on
-  # dual-stack VPS where Let's Encrypt may try IPv6 first and the AAAA record
-  # is missing or points to a different host).
-  if [[ "$port80_used" == "true" ]]; then
-    # Try nginx/apache webroot if available
-    if command -v nginx &>/dev/null; then
-      "$ACME_CMD" --issue -d "$CFG_DOMAIN" --webroot /var/www/html \
-        --keylength ec-256 --listen-v4 2>&1 | tail -5
+  # ── Register acme.sh account (idempotent) ──────────────────
+  "$ACME_CMD" --register-account -m "$CFG_EMAIL" --server letsencrypt 2>&1 | \
+    grep -iE "register|already|account" | head -3 || true
+
+  # ── Helper: run acme.sh --issue and capture full output ────
+  _run_acme_issue() {
+    local mode="$1"  # "standalone" | "webroot"
+    info "Running: acme.sh --issue -d ${CFG_DOMAIN} --${mode} --keylength ec-256 --listen-v4"
+    local out rc
+    if [[ "$mode" == "webroot" ]]; then
+      mkdir -p /var/www/html
+      out=$("$ACME_CMD" --issue -d "$CFG_DOMAIN" --webroot /var/www/html \
+        --keylength ec-256 --listen-v4 --server letsencrypt 2>&1) || rc=$?
     else
-      warn "Cannot free port 80 automatically. Stopping xray temporarily..."
+      out=$("$ACME_CMD" --issue -d "$CFG_DOMAIN" --standalone \
+        --keylength ec-256 --listen-v4 --server letsencrypt 2>&1) || rc=$?
+    fi
+    rc=${rc:-0}
+    # Show last 25 lines so user can see the real error
+    echo "$out" | tail -25 | while IFS= read -r l; do echo -e "    ${C_GRAY}${l}${C_RESET}"; done
+    return $rc
+  }
+
+  # ── Issue certificate ──────────────────────────────────────
+  local issue_rc=0
+  if [[ "$port80_used" == "true" ]]; then
+    if command -v nginx &>/dev/null && [[ -d /var/www/html ]]; then
+      _run_acme_issue webroot || issue_rc=$?
+    else
+      warn "Stopping port-80 service temporarily for standalone validation..."
+      [[ -n "$port80_pid" ]] && kill "$port80_pid" 2>/dev/null
       systemctl stop xray 2>/dev/null || true
-      "$ACME_CMD" --issue -d "$CFG_DOMAIN" --standalone \
-        --keylength ec-256 --listen-v4 2>&1 | tail -5
+      sleep 2
+      _run_acme_issue standalone || issue_rc=$?
       systemctl start xray 2>/dev/null || true
     fi
   else
-    "$ACME_CMD" --issue -d "$CFG_DOMAIN" --standalone \
-      --keylength ec-256 --listen-v4 2>&1 | tail -5
+    _run_acme_issue standalone || issue_rc=$?
   fi
 
-  # Install certificate to target dir
-  "$ACME_CMD" --installcert -d "$CFG_DOMAIN" \
+  # ── Verify the cert file actually exists before installcert ─
+  local acme_cert_path="$HOME/.acme.sh/${CFG_DOMAIN}_ecc/${CFG_DOMAIN}.cer"
+  if [[ $issue_rc -ne 0 ]] || [[ ! -f "$acme_cert_path" ]]; then
+    fail "acme.sh --issue failed (exit ${issue_rc}). No cert at ${acme_cert_path}"
+    info "Common causes:"
+    info "  • DNS A-record for ${CFG_DOMAIN} not pointing to this server's public IP"
+    info "  • Cloudflare proxy enabled (orange cloud must be DNS-only / gray)"
+    info "  • Port 80 not reachable from internet (provider firewall / security group)"
+    info "  • Let's Encrypt rate-limit hit (5 certs/week per domain)"
+    info "  • Server IP geo-blocked by Let's Encrypt (Iran sanctions)"
+    autofix_diagnose "SSL"
+    return 1
+  fi
+
+  ok "acme.sh issued certificate (ec-256)"
+
+  # ── Install certificate to target dir ──────────────────────
+  # --ecc is REQUIRED when --installcert references an EC key (matches the
+  # ${domain}_ecc directory acme.sh created during --issue).
+  "$ACME_CMD" --installcert -d "$CFG_DOMAIN" --ecc \
     --cert-file     "${SSL_DIR}/cert.pem" \
     --key-file      "${SSL_KEY}" \
     --fullchain-file "${SSL_CERT}" \
@@ -638,9 +698,10 @@ phase4a_ssl() {
     chgrp nobody "$SSL_KEY" 2>/dev/null || true
     chmod o+x /etc/ssl/xhttp 2>/dev/null || true
     chmod o+x "$(dirname "$SSL_KEY")" 2>/dev/null || true
-    ok "SSL certificate issued → $SSL_CERT"
+    ok "SSL certificate installed → $SSL_CERT"
   else
-    fail "SSL issuance failed."
+    fail "SSL installcert failed — cert was issued but not copied to ${SSL_CERT}"
+    info "Manually try: $ACME_CMD --installcert -d $CFG_DOMAIN --ecc --cert-file ... --key-file ... --fullchain-file ..."
     autofix_diagnose "SSL"
     return 1
   fi
