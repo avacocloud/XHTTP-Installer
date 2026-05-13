@@ -1030,53 +1030,74 @@ phase4c_netlify_deploy() {
   # Wait briefly for site to be fully ready in Netlify's API
   sleep 3
 
-  local set_ok=false
+  # Resolve account_slug for this site (the `-` shorthand doesn't work for env endpoints)
+  local NETLIFY_ACCOUNT_SLUG
+  NETLIFY_ACCOUNT_SLUG=$(curl -sS --max-time 15 \
+    "https://api.netlify.com/api/v1/sites/${site_id}" \
+    -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" 2>/dev/null | \
+    grep -oP '"account_slug"\s*:\s*"\K[^"]+' | head -1 || true)
+  if [[ -z "$NETLIFY_ACCOUNT_SLUG" ]]; then
+    NETLIFY_ACCOUNT_SLUG=$(curl -sS --max-time 15 \
+      "https://api.netlify.com/api/v1/accounts" \
+      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" 2>/dev/null | \
+      grep -oP '"slug"\s*:\s*"\K[^"]+' | head -1 || true)
+  fi
+  info "Netlify account_slug: ${NETLIFY_ACCOUNT_SLUG:-<unknown>}"
 
-  # ── PRIMARY: REST API (no interactive prompts, fast, reliable) ──
-  # CLI's env:set has an interactive overwrite prompt that hangs on existing vars.
-  info "Setting TARGET_DOMAIN via Netlify REST API..."
+  # Helper: set/replace one env var via REST API (no CLI, no prompts)
+  # Usage: _netlify_set_env_api KEY VALUE
+  _netlify_set_env_api() {
+    local key="$1" value="$2"
+    local set_ok=false
+    local api_base="https://api.netlify.com/api/v1/accounts/${NETLIFY_ACCOUNT_SLUG}/env"
+    [[ -z "$NETLIFY_ACCOUNT_SLUG" ]] && { warn "  no account_slug — cannot use REST API"; return 1; }
 
-  # Step 1: try DELETE first to remove any stale value (idempotent — ignore 404)
-  curl -sS --max-time 15 -o /dev/null \
-    -X DELETE "https://api.netlify.com/api/v1/accounts/-/env/TARGET_DOMAIN?site_id=${site_id}" \
-    -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" 2>/dev/null || true
+    # Step 1: DELETE any existing var (idempotent; 404 is fine)
+    curl -sS --max-time 15 -o /dev/null -w "%{http_code}" \
+      -X DELETE "${api_base}/${key}?site_id=${site_id}" \
+      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" >/dev/null 2>&1 || true
 
-  # Step 2: CREATE the var fresh
-  local api_body api_out
-  api_body=$(printf '[{"key":"TARGET_DOMAIN","values":[{"value":"%s","context":"production"}],"scopes":["functions"]}]' "$TARGET_DOMAIN_VAL")
-  api_out=$(curl -sS --max-time 20 \
-    -X POST "https://api.netlify.com/api/v1/accounts/-/env?site_id=${site_id}" \
-    -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$api_body" 2>&1 || true)
-  if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"|"values"\s*:'; then
-    ok "TARGET_DOMAIN set via REST API"
-    set_ok=true
-  else
-    # If POST said it already exists, try PUT to update
+    # Step 2: POST to create fresh
+    local body api_out
+    body=$(printf '[{"key":"%s","values":[{"value":"%s","context":"production"}],"scopes":["functions"]}]' "$key" "$value")
     api_out=$(curl -sS --max-time 20 \
-      -X PUT "https://api.netlify.com/api/v1/accounts/-/env/TARGET_DOMAIN?site_id=${site_id}" \
+      -X POST "${api_base}?site_id=${site_id}" \
       -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
       -H "Content-Type: application/json" \
-      -d "{\"key\":\"TARGET_DOMAIN\",\"values\":[{\"value\":\"${TARGET_DOMAIN_VAL}\",\"context\":\"production\"}],\"scopes\":[\"functions\"]}" 2>&1 || true)
-    if echo "$api_out" | grep -qE '"key"\s*:\s*"TARGET_DOMAIN"'; then
-      ok "TARGET_DOMAIN updated via REST API"
-      set_ok=true
+      -d "$body" 2>&1 || true)
+    if echo "$api_out" | grep -qE "\"key\"\s*:\s*\"${key}\""; then
+      ok "  ${key} set via REST API"
+      return 0
     fi
-  fi
 
-  # ── FALLBACK: CLI (only if REST API failed) ──
+    # Step 3: if POST failed (e.g. var still exists), try PUT to overwrite
+    api_out=$(curl -sS --max-time 20 \
+      -X PUT "${api_base}/${key}?site_id=${site_id}" \
+      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
+      -H "Content-Type: application/json" \
+      -d "{\"key\":\"${key}\",\"values\":[{\"value\":\"${value}\",\"context\":\"production\"}],\"scopes\":[\"functions\"]}" 2>&1 || true)
+    if echo "$api_out" | grep -qE "\"key\"\s*:\s*\"${key}\""; then
+      ok "  ${key} updated via REST API"
+      return 0
+    fi
+
+    warn "  REST API failed for ${key}. Response: $(echo "$api_out" | head -c 200)"
+    return 1
+  }
+
+  local set_ok=false
+  _netlify_set_env_api TARGET_DOMAIN "$TARGET_DOMAIN_VAL" && set_ok=true
+
+  # ── FALLBACK: CLI (only if REST API failed). Use --scope only (not both). ──
   if [[ "$set_ok" != "true" ]]; then
-    warn "REST API didn't confirm. Output (first 200 chars):"
-    echo "    $(echo "$api_out" | head -c 200)"
     info "Falling back to netlify CLI (stdin closed to avoid prompts)..."
     timeout 30 netlify link --id "$site_id" </dev/null >/dev/null 2>&1 || true
+    # Try without --context (since CLI rejects scope+context on existing vars)
     local set_out
-    # Close stdin so any interactive prompt fails fast instead of hanging
     set_out=$(timeout 30 netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" \
-      --scope functions --context production --site "$site_id" </dev/null 2>&1 || true)
+      --scope functions --site "$site_id" </dev/null 2>&1 || true)
     if echo "$set_out" | grep -qiE "set environment variable|in the .* context|added|updated|saved"; then
-      ok "TARGET_DOMAIN set via CLI fallback"
+      ok "TARGET_DOMAIN set via CLI fallback (scope only)"
       set_ok=true
     else
       warn "CLI fallback also failed: $(echo "$set_out" | head -c 200)"
@@ -1085,9 +1106,11 @@ phase4c_netlify_deploy() {
 
   # Verify (REST API — fast, no hangs)
   local env_list
-  env_list=$(curl -sS --max-time 15 \
-    "https://api.netlify.com/api/v1/accounts/-/env?site_id=${site_id}" \
-    -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" 2>/dev/null || true)
+  if [[ -n "$NETLIFY_ACCOUNT_SLUG" ]]; then
+    env_list=$(curl -sS --max-time 15 \
+      "https://api.netlify.com/api/v1/accounts/${NETLIFY_ACCOUNT_SLUG}/env?site_id=${site_id}" \
+      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" 2>/dev/null || true)
+  fi
   popd > /dev/null
 
   if echo "$env_list" | grep -qF "$TARGET_DOMAIN_VAL"; then
@@ -1150,13 +1173,10 @@ phase4c_netlify_deploy() {
       elif [[ "$verify_code" == "500" ]] && echo "$verify_body" | grep -qi "Misconfigured\|TARGET_DOMAIN"; then
         need_redeploy=true
         redeploy_reason="HTTP 500 — TARGET_DOMAIN env not visible to edge function"
-        # Re-set TARGET_DOMAIN with correct scope before redeploy
-        info "Re-applying TARGET_DOMAIN before redeploy..."
-        pushd "$NETLIFY_DIR" > /dev/null
-        netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" \
-          --scope functions --context production --site "$site_id" >/dev/null 2>&1 || \
-        netlify env:set TARGET_DOMAIN "$TARGET_DOMAIN_VAL" --site "$site_id" >/dev/null 2>&1 || true
-        popd > /dev/null
+        # Re-set TARGET_DOMAIN via REST API (NOT CLI — avoid overwrite-prompt hang)
+        info "Re-applying TARGET_DOMAIN before redeploy (via REST API)..."
+        _netlify_set_env_api TARGET_DOMAIN "$TARGET_DOMAIN_VAL" || \
+          warn "Re-apply via REST API failed — relying on deployed value"
       fi
 
       if [[ "$need_redeploy" == "true" ]]; then
