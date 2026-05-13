@@ -639,15 +639,20 @@ phase4b_configure_xray() {
   # ── Backup old config ────────────────────────────────────
   [[ -f "$XRAY_CFG" ]] && cp "$XRAY_CFG" "${XRAY_CFG}.bak" 2>/dev/null || true
 
-  # ── Determine xPaddingBytes based on platform ────────────
-  # Netlify breaks default 100-1000 byte padding → use 1-1 (effectively disabled)
-  # Vercel handles padding fine → keep default for stronger DPI evasion
-  local XPADDING
+  # ── Platform-specific XHTTP tuning ───────────────────────
+  # Netlify:
+  #   - xPaddingBytes 100-1000 breaks Netlify (body modification) → use 1-1
+  #   - mode "auto" → "packet-up" → many POSTs → Netlify HTTP 429 rate limit
+  #     → force "stream-up" (one long upload stream, very few requests)
+  # Vercel: handles default values fine
+  local XPADDING XHTTP_MODE
   if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
     XPADDING="1-1"
-    info "Platform=netlify → using xPaddingBytes=1-1 (Netlify-compatible)"
+    XHTTP_MODE="stream-up"
+    info "Platform=netlify → xPaddingBytes=1-1, mode=stream-up (avoids 429 rate limit)"
   else
     XPADDING="100-1000"
+    XHTTP_MODE="auto"
   fi
 
   # ── Write config.json ────────────────────────────────────
@@ -686,7 +691,7 @@ phase4b_configure_xray() {
         "xhttpSettings": {
           "path": "${CFG_RELAY_PATH}",
           "host": "${CFG_DOMAIN}",
-          "mode": "auto",
+          "mode": "${XHTTP_MODE}",
           "xPaddingBytes": "${XPADDING}"
         }
       }
@@ -1434,6 +1439,10 @@ phase5_healthcheck() {
     else
     info "E2E vars — relay: ${VERCEL_HOST}  uuid: ${INBOUND_UUID}  path: ${CFG_PUBLIC_PATH}"
 
+    # Match the server-side mode (Netlify needs stream-up to avoid 429)
+    local CLIENT_MODE="auto"
+    [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && CLIENT_MODE="stream-up"
+
     local TEST_SOCKS_PORT=10809
     local TEST_CFG
     TEST_CFG=$(mktemp --suffix=.json)
@@ -1468,7 +1477,7 @@ phase5_healthcheck() {
       "xhttpSettings": {
         "path": "${CFG_PUBLIC_PATH}",
         "host": "${VERCEL_HOST}",
-        "mode": "auto"
+        "mode": "${CLIENT_MODE}"
       }
     }
   }, {
@@ -1805,13 +1814,16 @@ phase6_summary() {
   local ENCODED_PATH
   ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
   local LINK_TAG="XHTTP-${CFG_PLATFORM}"
-  # xPaddingBytes: Netlify rejects/strips the default 100-1000 byte padding → use 1-1.
-  # Vercel handles padding fine → keep default 100-1000 for stronger DPI evasion.
-  local LINK_PADDING="100-1000"
-  [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && LINK_PADDING="1-1"
+  # Netlify needs xPaddingBytes=1-1 + mode=stream-up (avoids body modification + HTTP 429 rate limit)
+  # Vercel keeps the defaults (better DPI evasion)
+  local LINK_PADDING="100-1000" LINK_MODE="auto"
+  if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
+    LINK_PADDING="1-1"
+    LINK_MODE="stream-up"
+  fi
   # URL-encoded {"xPaddingBytes":"<value>"}
   local ENCODED_EXTRA="%7B%22xPaddingBytes%22%3A%22${LINK_PADDING}%22%7D"
-  local CLIENT_LINK="vless://${INBOUND_UUID:-UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto&extra=${ENCODED_EXTRA}#${LINK_TAG}"
+  local CLIENT_LINK="vless://${INBOUND_UUID:-UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=${LINK_MODE}&extra=${ENCODED_EXTRA}#${LINK_TAG}"
 
   echo ""
   echo -e "${C_GREEN}"
