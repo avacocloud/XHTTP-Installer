@@ -922,11 +922,19 @@ phase4a_ssl() {
     chmod o+x "$(dirname "$SSL_KEY")" 2>/dev/null || true
     ok "SSL certificate installed → $SSL_CERT"
     # Restart any web services we stopped to free port 80
-    [[ ${#STOPPED_SERVICES[@]} -gt 0 ]] && _restart_stopped_services
+    if [[ ${#STOPPED_SERVICES[@]} -gt 0 ]]; then
+      _restart_stopped_services
+    fi
+    # IMPORTANT: explicit `return 0` — the `[[ -gt 0 ]] && cmd` pattern above
+    # would return 1 if STOPPED_SERVICES is empty (the normal case), tricking
+    # autofix_and_retry into thinking SSL failed even when it succeeded.
+    return 0
   else
     fail "SSL installcert failed — cert was issued but not copied to ${SSL_CERT}"
     info "Manually try: $ACME_CMD --installcert -d $CFG_DOMAIN --ecc --cert-file ... --key-file ... --fullchain-file ..."
-    [[ ${#STOPPED_SERVICES[@]} -gt 0 ]] && _restart_stopped_services
+    if [[ ${#STOPPED_SERVICES[@]} -gt 0 ]]; then
+      _restart_stopped_services
+    fi
     autofix_diagnose "SSL"
     return 1
   fi
