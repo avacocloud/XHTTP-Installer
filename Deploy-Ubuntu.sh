@@ -956,17 +956,43 @@ phase4b_configure_xray() {
   [[ -f "$XRAY_CFG" ]] && cp "$XRAY_CFG" "${XRAY_CFG}.bak" 2>/dev/null || true
 
   # ── Platform-specific XHTTP tuning ───────────────────────
-  # Netlify needs xPaddingBytes=1-1 (default 100-1000 breaks Netlify body handling).
-  # mode stays "auto" — verified working with real clients. The end-to-end self-test
-  # may still get HTTP 429 because of an outbound→edge→inbound loop on the same IP,
-  # but real clients (phone/desktop) connecting from a different IP work fine.
+  # Vercel: default padding 100-1000 works fine.
+  # Netlify: needs obfuscation-mode padding (10-50 + random key/header) to
+  #          survive Netlify's edge body handling. The same key/header MUST
+  #          be present in the client link's `extra` param or traffic is rejected.
   local XPADDING XHTTP_MODE="auto"
+  local XHTTP_EXTRA_BLOCK=""        # extra JSON properties for xray xhttpSettings
+  XPADDING_KEY=""
+  XPADDING_HEADER=""
+  XPADDING_OBFS="false"
+  SC_MAX_POST_BYTES=""
+
   if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
-    XPADDING="1-1"
-    info "Platform=netlify → xPaddingBytes=1-1, mode=auto"
+    XPADDING="10-50"
+    XPADDING_OBFS="true"
+    SC_MAX_POST_BYTES="1000000"
+    # Random key (lowercase, 7 chars) and header (mixed-case, 7 chars).
+    # /dev/urandom may produce no bytes in some environments — fall back to RANDOM.
+    XPADDING_KEY=$(LC_ALL=C tr -dc 'a-z' </dev/urandom 2>/dev/null | head -c 7 || true)
+    XPADDING_HEADER=$(LC_ALL=C tr -dc 'A-Za-z' </dev/urandom 2>/dev/null | head -c 7 || true)
+    [[ -z "$XPADDING_KEY"    ]] && XPADDING_KEY="k$(printf '%06d' $RANDOM)"
+    [[ -z "$XPADDING_HEADER" ]] && XPADDING_HEADER="H$(printf '%06d' $RANDOM)"
+
+    info "Platform=netlify → xPaddingBytes=${XPADDING}, obfsMode=on"
+    info "Generated xPaddingKey    : ${XPADDING_KEY}"
+    info "Generated xPaddingHeader : ${XPADDING_HEADER}"
+
+    XHTTP_EXTRA_BLOCK=",
+          \"xPaddingObfsMode\": true,
+          \"xPaddingKey\": \"${XPADDING_KEY}\",
+          \"xPaddingHeader\": \"${XPADDING_HEADER}\",
+          \"scMaxEachPostBytes\": \"${SC_MAX_POST_BYTES}\""
   else
     XPADDING="100-1000"
   fi
+
+  # Export so phase6_summary + phase7_install_panel can reuse them in the VLESS link
+  export XPADDING XPADDING_KEY XPADDING_HEADER XPADDING_OBFS SC_MAX_POST_BYTES
 
   # ── Write config.json ────────────────────────────────────
   info "Writing Xray config → ${XRAY_CFG}"
@@ -1005,7 +1031,7 @@ phase4b_configure_xray() {
           "path": "${CFG_RELAY_PATH}",
           "host": "${CFG_DOMAIN}",
           "mode": "${XHTTP_MODE}",
-          "xPaddingBytes": "${XPADDING}"
+          "xPaddingBytes": "${XPADDING}"${XHTTP_EXTRA_BLOCK}
         }
       }
     }
@@ -2407,11 +2433,16 @@ phase6_summary() {
   local ENCODED_PATH
   ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
   local LINK_TAG="XHTTP-${CFG_PLATFORM}"
-  # Netlify needs xPaddingBytes=1-1 (avoids body-modification handshake failures)
-  local LINK_PADDING="100-1000"
-  [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && LINK_PADDING="1-1"
-  # URL-encoded {"xPaddingBytes":"<value>"}
-  local ENCODED_EXTRA="%7B%22xPaddingBytes%22%3A%22${LINK_PADDING}%22%7D"
+  # Build the `extra` JSON. Netlify needs obfuscation params; Vercel just gets xPaddingBytes.
+  local EXTRA_JSON
+  if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
+    EXTRA_JSON=$(printf '{"xPaddingBytes":"%s","xPaddingObfsMode":true,"xPaddingKey":"%s","xPaddingHeader":"%s","scMaxEachPostBytes":"%s"}' \
+      "${XPADDING:-10-50}" "${XPADDING_KEY:-}" "${XPADDING_HEADER:-}" "${SC_MAX_POST_BYTES:-1000000}")
+  else
+    EXTRA_JSON=$(printf '{"xPaddingBytes":"%s"}' "${XPADDING:-100-1000}")
+  fi
+  local ENCODED_EXTRA
+  ENCODED_EXTRA=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$EXTRA_JSON" 2>/dev/null || echo "$EXTRA_JSON")
   local CLIENT_LINK="vless://${INBOUND_UUID:-UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto&extra=${ENCODED_EXTRA}#${LINK_TAG}"
 
   echo ""
@@ -2429,6 +2460,16 @@ phase6_summary() {
   echo -e "  ${C_WHITE}RELAY_PATH       :${C_RESET} ${CFG_RELAY_PATH}"
   echo -e "  ${C_WHITE}PUBLIC_PATH      :${C_RESET} ${CFG_PUBLIC_PATH}"
   echo -e "  ${C_WHITE}TARGET_DOMAIN    :${C_RESET} ${TARGET_DOMAIN_VAL}"
+
+  # ── Obfuscation params (Netlify only) ──
+  if [[ "${CFG_PLATFORM:-vercel}" == "netlify" && -n "${XPADDING_KEY:-}" ]]; then
+    echo ""
+    echo -e "  ${C_CYAN}── XHTTP Obfuscation (Netlify) ──${C_RESET}"
+    echo -e "  ${C_WHITE}xPaddingBytes    :${C_RESET} ${XPADDING}"
+    echo -e "  ${C_WHITE}xPaddingKey      :${C_RESET} ${C_YELLOW}${XPADDING_KEY}${C_RESET}"
+    echo -e "  ${C_WHITE}xPaddingHeader   :${C_RESET} ${C_YELLOW}${XPADDING_HEADER}${C_RESET}"
+    echo -e "  ${C_GRAY}                   (already embedded in the client link below)${C_RESET}"
+  fi
   echo ""
 
   # ── E2E test result (set by phase5_healthcheck) ──
@@ -2487,12 +2528,16 @@ phase7_install_panel() {
   chmod 700 "$STATE_DIR"
 
   # Build the client link (same as summary)
-  local VERCEL_HOST ENCODED_PATH LINK_PADDING ENCODED_EXTRA CLIENT_LINK
+  local VERCEL_HOST ENCODED_PATH EXTRA_JSON ENCODED_EXTRA CLIENT_LINK
   VERCEL_HOST=$(echo "${VERCEL_URL:-}" | sed 's|https://||; s|/.*||')
   ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
-  LINK_PADDING="100-1000"
-  [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && LINK_PADDING="1-1"
-  ENCODED_EXTRA="%7B%22xPaddingBytes%22%3A%22${LINK_PADDING}%22%7D"
+  if [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]]; then
+    EXTRA_JSON=$(printf '{"xPaddingBytes":"%s","xPaddingObfsMode":true,"xPaddingKey":"%s","xPaddingHeader":"%s","scMaxEachPostBytes":"%s"}' \
+      "${XPADDING:-10-50}" "${XPADDING_KEY:-}" "${XPADDING_HEADER:-}" "${SC_MAX_POST_BYTES:-1000000}")
+  else
+    EXTRA_JSON=$(printf '{"xPaddingBytes":"%s"}' "${XPADDING:-100-1000}")
+  fi
+  ENCODED_EXTRA=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$EXTRA_JSON" 2>/dev/null || echo "$EXTRA_JSON")
   CLIENT_LINK="vless://${INBOUND_UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto&extra=${ENCODED_EXTRA}#XHTTP-${CFG_PLATFORM}"
 
   cat > "$STATE_FILE" <<STATE
@@ -2509,6 +2554,10 @@ VERCEL_URL="${VERCEL_URL:-}"
 VERCEL_HOST="${VERCEL_HOST}"
 SSL_CERT="${SSL_CERT:-}"
 SSL_KEY="${SSL_KEY:-}"
+XPADDING="${XPADDING:-}"
+XPADDING_KEY="${XPADDING_KEY:-}"
+XPADDING_HEADER="${XPADDING_HEADER:-}"
+SC_MAX_POST_BYTES="${SC_MAX_POST_BYTES:-}"
 CLIENT_LINK="${CLIENT_LINK}"
 HYBRID_SUB_URL="${HYBRID_SUB_URL:-}"
 HYBRID_CONFIG_COUNT="${HYBRID_CONFIG_COUNT:-0}"
@@ -2576,12 +2625,20 @@ _show_config() {
   echo ""
   echo -e "  ${C_YELLOW}${CLIENT_LINK}${C_RESET}"
   echo ""
-  echo -e "  ${C_WHITE}UUID         :${C_RESET} ${C_YELLOW}${INBOUND_UUID}${C_RESET}"
-  echo -e "  ${C_WHITE}Domain       :${C_RESET} ${CFG_DOMAIN}"
-  echo -e "  ${C_WHITE}Port         :${C_RESET} ${CFG_INBOUND_PORT}"
-  echo -e "  ${C_WHITE}RELAY_PATH   :${C_RESET} ${CFG_RELAY_PATH}"
-  echo -e "  ${C_WHITE}PUBLIC_PATH  :${C_RESET} ${CFG_PUBLIC_PATH}"
-  echo -e "  ${C_WHITE}Relay host   :${C_RESET} ${VERCEL_HOST}"
+  echo -e "  ${C_WHITE}UUID           :${C_RESET} ${C_YELLOW}${INBOUND_UUID}${C_RESET}"
+  echo -e "  ${C_WHITE}Domain         :${C_RESET} ${CFG_DOMAIN}"
+  echo -e "  ${C_WHITE}Port           :${C_RESET} ${CFG_INBOUND_PORT}"
+  echo -e "  ${C_WHITE}RELAY_PATH     :${C_RESET} ${CFG_RELAY_PATH}"
+  echo -e "  ${C_WHITE}PUBLIC_PATH    :${C_RESET} ${CFG_PUBLIC_PATH}"
+  echo -e "  ${C_WHITE}Relay host     :${C_RESET} ${VERCEL_HOST}"
+  if [[ "${CFG_PLATFORM:-}" == "netlify" && -n "${XPADDING_KEY:-}" ]]; then
+    echo ""
+    echo -e "  ${C_CYAN}── Obfuscation params (Netlify) ──${C_RESET}"
+    echo -e "  ${C_WHITE}xPaddingBytes  :${C_RESET} ${XPADDING:-10-50}"
+    echo -e "  ${C_WHITE}xPaddingKey    :${C_RESET} ${C_YELLOW}${XPADDING_KEY}${C_RESET}"
+    echo -e "  ${C_WHITE}xPaddingHeader :${C_RESET} ${C_YELLOW}${XPADDING_HEADER}${C_RESET}"
+    echo -e "  ${C_GRAY}                   (already in the link above)${C_RESET}"
+  fi
   echo ""
   read -rp "  Press Enter to return..." _
 }
