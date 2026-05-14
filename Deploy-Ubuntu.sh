@@ -960,8 +960,13 @@ phase4b_configure_xray() {
   # Netlify: needs obfuscation-mode padding (10-50 + random key/header) to
   #          survive Netlify's edge body handling. The same key/header MUST
   #          be present in the client link's `extra` param or traffic is rejected.
-  local XPADDING XHTTP_MODE="auto"
+  # NOTE: do NOT declare XPADDING / XPADDING_KEY / XPADDING_HEADER / SC_MAX_POST_BYTES
+  # as `local` here — they need to outlive this function so phase6_summary and
+  # phase7_install_panel can embed them in the VLESS link. The `local` keyword
+  # confines them to this function's scope (export doesn't override that).
+  local XHTTP_MODE="auto"
   local XHTTP_EXTRA_BLOCK=""        # extra JSON properties for xray xhttpSettings
+  XPADDING=""
   XPADDING_KEY=""
   XPADDING_HEADER=""
   XPADDING_OBFS="false"
@@ -1323,6 +1328,33 @@ phase4c_vercel_deploy() {
   info "Linking to project..."
   _vercel_link || { fail "Could not link to project $CFG_PROJECT_NAME"; popd > /dev/null; return 1; }
   ok "Linked to $CFG_PROJECT_NAME"
+
+  # ── Disable Deployment Protection via REST API ──────────
+  # Pro/Team accounts often have ssoProtection / passwordProtection enabled by
+  # default; this returns HTTP 401 on every request to the deployment and
+  # breaks the relay. Vercel API allows clearing both fields.
+  info "Disabling Deployment Protection on the project (if applicable)..."
+  local api_url="https://api.vercel.com/v9/projects/${CFG_PROJECT_NAME}"
+  [[ -n "${CFG_VERCEL_SCOPE:-}" ]] && api_url="${api_url}?teamId=${CFG_VERCEL_SCOPE}"
+  local prot_out prot_code
+  prot_out=$(curl -s -o /tmp/.vercel-prot-resp -w "%{http_code}" --max-time 10 \
+    -X PATCH "$api_url" \
+    -H "Authorization: Bearer ${CFG_VERCEL_TOKEN}" \
+    -H "Content-Type: application/json" \
+    --data '{"ssoProtection":null,"passwordProtection":null}' 2>/dev/null || echo "000")
+  prot_code="$prot_out"
+  if [[ "$prot_code" == "200" ]]; then
+    ok "Deployment Protection disabled via API"
+  elif [[ "$prot_code" == "403" ]]; then
+    info "Cannot disable via API (Hobby plan — protection already off by default)"
+  else
+    warn "Could not disable Deployment Protection via API (HTTP ${prot_code})"
+    info "If deploy returns 401 later, disable manually at:"
+    info "  https://vercel.com/dashboard → ${CFG_PROJECT_NAME} → Settings → Deployment Protection"
+    [[ -s /tmp/.vercel-prot-resp ]] && head -3 /tmp/.vercel-prot-resp | \
+      while IFS= read -r l; do info "  $l"; done
+  fi
+  rm -f /tmp/.vercel-prot-resp
 
   # ── ENV vars ────────────────────────────────────────────
   info "Setting environment variables (via stdin — required by recent Vercel CLI)..."
@@ -2465,9 +2497,9 @@ phase6_summary() {
   if [[ "${CFG_PLATFORM:-vercel}" == "netlify" && -n "${XPADDING_KEY:-}" ]]; then
     echo ""
     echo -e "  ${C_CYAN}── XHTTP Obfuscation (Netlify) ──${C_RESET}"
-    echo -e "  ${C_WHITE}xPaddingBytes    :${C_RESET} ${XPADDING}"
-    echo -e "  ${C_WHITE}xPaddingKey      :${C_RESET} ${C_YELLOW}${XPADDING_KEY}${C_RESET}"
-    echo -e "  ${C_WHITE}xPaddingHeader   :${C_RESET} ${C_YELLOW}${XPADDING_HEADER}${C_RESET}"
+    echo -e "  ${C_WHITE}xPaddingBytes    :${C_RESET} ${XPADDING:-10-50}"
+    echo -e "  ${C_WHITE}xPaddingKey      :${C_RESET} ${C_YELLOW}${XPADDING_KEY:-}${C_RESET}"
+    echo -e "  ${C_WHITE}xPaddingHeader   :${C_RESET} ${C_YELLOW}${XPADDING_HEADER:-}${C_RESET}"
     echo -e "  ${C_GRAY}                   (already embedded in the client link below)${C_RESET}"
   fi
   echo ""
@@ -2709,6 +2741,37 @@ _renew_ssl() {
   read -rp "Enter..." _
 }
 
+_update_script() {
+  _banner
+  echo -e "  ${C_CYAN}── Update / Re-deploy ──${C_RESET}"
+  echo ""
+  echo -e "  ${C_GRAY}This pulls the latest installer, re-runs the deploy phase,${C_RESET}"
+  echo -e "  ${C_GRAY}and keeps your existing SSL cert (acme.sh auto-skips if still valid).${C_RESET}"
+  echo -e "  ${C_GRAY}Your UUID, domain, and config stay the same.${C_RESET}"
+  echo ""
+  read -rp "  Continue? [y/N]: " yn
+  case "${yn,,}" in y|yes) ;; *) return ;; esac
+
+  local TARGET_DIR="/root/XHTTP-Installer"
+  if [[ -d "$TARGET_DIR/.git" ]]; then
+    echo -e "  ${C_CYAN}Pulling latest from GitHub...${C_RESET}"
+    git -C "$TARGET_DIR" fetch --depth=1 origin main 2>&1 | tail -5
+    git -C "$TARGET_DIR" reset --hard origin/main 2>&1 | tail -3
+  else
+    echo -e "  ${C_YELLOW}No existing checkout — cloning fresh...${C_RESET}"
+    git clone --depth=1 --branch main \
+      "https://github.com/avacocloud/XHTTP-Installer.git" "$TARGET_DIR" 2>&1 | tail -5
+  fi
+
+  echo ""
+  echo -e "  ${C_CYAN}Running updated installer (will re-use existing SSL)...${C_RESET}"
+  sleep 1
+  cd "$TARGET_DIR"
+  chmod +x Deploy-Ubuntu.sh
+  # XHTTP_NO_SCREEN=1 prevents the auto-screen wrapper (we're already inside a terminal)
+  exec env XHTTP_NO_SCREEN=1 bash Deploy-Ubuntu.sh
+}
+
 _uninstall() {
   _banner
   echo -e "  ${C_RED}── UNINSTALL XHTTP Installer ──${C_RESET}"
@@ -2743,17 +2806,19 @@ while true; do
   echo -e "    ${C_YELLOW}3${C_RESET}) Restart xray"
   echo -e "    ${C_YELLOW}4${C_RESET}) View logs"
   echo -e "    ${C_YELLOW}5${C_RESET}) Renew SSL certificate"
-  echo -e "    ${C_YELLOW}6${C_RESET}) ${C_RED}Uninstall${C_RESET}"
+  echo -e "    ${C_YELLOW}6${C_RESET}) ${C_CYAN}Update / Re-deploy${C_RESET} ${C_GRAY}(keeps existing SSL)${C_RESET}"
+  echo -e "    ${C_YELLOW}7${C_RESET}) ${C_RED}Uninstall${C_RESET}"
   echo -e "    ${C_YELLOW}0${C_RESET}) Exit"
   echo ""
-  read -rp "  Choose [0-6]: " choice
+  read -rp "  Choose [0-7]: " choice
   case "$choice" in
     1) _show_config ;;
     2) _show_status ;;
     3) _restart_xray ;;
     4) _view_logs ;;
     5) _renew_ssl ;;
-    6) _uninstall ;;
+    6) _update_script ;;
+    7) _uninstall ;;
     0) clear; exit 0 ;;
     *) ;;
   esac
