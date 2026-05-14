@@ -234,8 +234,11 @@ autofix_diagnose() {
         warn "Fix: set A-record of ${CFG_DOMAIN:-?} to ${my_ipv4:-<server-public-ip>}"
         info "Note: on AWS Lightsail/EC2, use the Static/Elastic IP shown in the console, not the private IP"
       fi
-      ufw allow 80/tcp 2>/dev/null || true
-      ok "Firewall: port 80 opened"
+      # Only add UFW rule if it's already active
+      if ufw status 2>/dev/null | grep -qi "Status: active"; then
+        ufw allow 80/tcp 2>/dev/null || true
+        ok "Firewall: port 80 allowed (ufw was already active)"
+      fi
       ;;
     XRAYSSL)
       [[ -f "${SSL_CERT:-}" ]] && chmod 644 "${SSL_CERT}" 2>/dev/null && ok "Cert permissions fixed" || fail "Cert missing: ${SSL_CERT:-unset}"
@@ -256,12 +259,16 @@ autofix_diagnose() {
       ok "Vercel link cache cleared — will re-link on retry"
       ;;
     FIREWALL)
-      ufw allow 22/tcp 2>/dev/null || true
-      ufw allow 80/tcp 2>/dev/null || true
-      ufw allow 443/tcp 2>/dev/null || true
-      ufw allow "${CFG_INBOUND_PORT:-2096}/tcp" 2>/dev/null || true
-      ufw --force enable 2>/dev/null || true
-      ok "Firewall rules applied: 22, 80, 443, ${CFG_INBOUND_PORT:-2096}"
+      # Only add allow rules if UFW is ALREADY enabled — do NOT enable it ourselves.
+      if ufw status 2>/dev/null | grep -qi "Status: active"; then
+        ufw allow 22/tcp 2>/dev/null || true
+        ufw allow 80/tcp 2>/dev/null || true
+        ufw allow 443/tcp 2>/dev/null || true
+        ufw allow "${CFG_INBOUND_PORT:-2096}/tcp" 2>/dev/null || true
+        ok "Firewall rules added (ufw already active): 22, 80, 443, ${CFG_INBOUND_PORT:-2096}"
+      else
+        info "UFW not active — skipping firewall configuration"
+      fi
       ;;
     XRAY)
       warn "Restarting xray service..."
@@ -576,7 +583,35 @@ phase3_collect_input() {
   # ── SSL / Domain ────────────────────────────────────────
   echo -e "\n  ${C_CYAN}[ SSL & Domain ]${C_RESET}"
   CFG_DOMAIN=$(read_required "Your domain (e.g. sub.example.com)")
-  CFG_EMAIL=$(read_default   "Email for acme.sh notifications" "admin@${CFG_DOMAIN}")
+
+  # Email must be a REAL deliverable address — Let's Encrypt rejects
+  # admin@yoursub, *@example.com, *@test.com, etc.
+  echo -e "  ${C_GRAY}Enter a REAL email — any provider works (Gmail, Yahoo, Outlook,${C_RESET}"
+  echo -e "  ${C_GRAY}ProtonMail, iCloud, Zoho, your own domain, etc.).${C_RESET}"
+  echo -e "  ${C_GRAY}Let's Encrypt rejects fake/placeholder addresses.${C_RESET}"
+  while true; do
+    CFG_EMAIL=$(read_required "Email for Let's Encrypt notifications (must be real)")
+    # Reject obvious placeholders
+    local lower_email="${CFG_EMAIL,,}"
+    if [[ ! "$lower_email" =~ ^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$ ]]; then
+      fail "Not a valid email format. Example: yourname@yourprovider.com"
+      continue
+    fi
+    if echo "$lower_email" | grep -qE '@(example\.|test\.|domain\.|yourdomain\.|mydomain\.|localhost|local$|invalid$)'; then
+      fail "Fake/placeholder email rejected. Use any real email account you own."
+      continue
+    fi
+    if echo "$lower_email" | grep -qE "@${CFG_DOMAIN}$"; then
+      warn "You're using an email on the same domain you're securing (@${CFG_DOMAIN})."
+      warn "Let's Encrypt may reject this if no MX record exists."
+      warn "Recommended: any third-party provider (Gmail, Yahoo, Outlook, ProtonMail, etc.)"
+      if ! confirm "Continue with ${CFG_EMAIL} anyway?"; then
+        continue
+      fi
+    fi
+    break
+  done
+  ok "Email accepted: ${CFG_EMAIL}"
 
   # ── Inbound / Relay ─────────────────────────────────────
   echo -e "\n  ${C_CYAN}[ Inbound & Relay ]${C_RESET}"
@@ -703,13 +738,47 @@ phase4a_ssl() {
     warn "acme.sh will still try; Let's Encrypt resolves DNS independently."
   fi
 
-  # ── Stop any service using port 80 temporarily ─────────────
-  local port80_used=false port80_pid=""
+  # ── Detect & stop any service holding port 80 (Apache / Nginx / etc.) ─
+  local port80_used=false port80_pid="" port80_proc=""
+  local STOPPED_SERVICES=()   # remember what we stopped so we can restart after
+
   if ss -tlnp 2>/dev/null | grep -q ':80 '; then
     port80_used=true
     port80_pid=$(ss -tlnp 2>/dev/null | grep ':80 ' | grep -oP 'pid=\K[0-9]+' | head -1)
-    warn "Port 80 is in use (PID ${port80_pid:-?}) — will try webroot or temp-stop service"
+    port80_proc=$(ss -tlnp 2>/dev/null | grep ':80 ' | grep -oP 'users:\(\("\K[^"]+' | head -1)
+    warn "Port 80 is in use by '${port80_proc:-unknown}' (PID ${port80_pid:-?})"
+
+    # Try to stop known web services cleanly via systemctl (preferred over kill)
+    for svc in apache2 httpd nginx caddy lighttpd; do
+      if systemctl is-active --quiet "$svc" 2>/dev/null; then
+        info "Stopping ${svc}.service (will restart after SSL)..."
+        if systemctl stop "$svc" 2>/dev/null; then
+          STOPPED_SERVICES+=("$svc")
+          ok "${svc} stopped"
+        fi
+      fi
+    done
+    sleep 2
+
+    # Verify port is free now
+    if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+      warn "Port 80 still in use after stopping web services"
+    else
+      ok "Port 80 freed"
+      port80_used=false
+    fi
   fi
+
+  # Helper: restart all services we stopped (called on success and failure)
+  _restart_stopped_services() {
+    for svc in "${STOPPED_SERVICES[@]}"; do
+      if systemctl start "$svc" 2>/dev/null; then
+        ok "${svc} restarted"
+      else
+        warn "Could not restart ${svc} — start it manually if needed"
+      fi
+    done
+  }
 
   # ── Register acme.sh account (idempotent) ──────────────────
   "$ACME_CMD" --register-account -m "$CFG_EMAIL" --server letsencrypt 2>&1 | \
@@ -788,6 +857,33 @@ phase4a_ssl() {
     fi
   fi
 
+  # ── If issue failed, try clearing stale acme.sh state and retry once ───
+  # acme.sh caches the CA directory URL and account info. If a previous run
+  # picked up ZeroSSL (which fails for many users) or got a stale account
+  # token, future runs reuse it and keep failing. Wipe and retry with
+  # Let's Encrypt forced.
+  if [[ $issue_rc -ne 0 ]] || [[ ! -f "$acme_cert_path" ]]; then
+    warn "First SSL attempt failed — clearing acme.sh CA/account cache and retrying..."
+    rm -rf "$HOME/.acme.sh/ca" 2>/dev/null || true
+    rm -f  "$HOME/.acme.sh/account.conf" 2>/dev/null || true
+    # Re-register account explicitly against Let's Encrypt
+    "$ACME_CMD" --register-account -m "$CFG_EMAIL" --server letsencrypt 2>&1 | \
+      grep -iE "register|account|created" | head -3 || true
+    "$ACME_CMD" --set-default-ca --server letsencrypt 2>&1 | tail -3 || true
+
+    issue_rc=0
+    if [[ "$port80_used" == "true" ]] && ! { command -v nginx &>/dev/null && [[ -d /var/www/html ]]; }; then
+      systemctl stop xray 2>/dev/null || true
+      sleep 2
+      _run_acme_issue standalone "--force" || issue_rc=$?
+      systemctl start xray 2>/dev/null || true
+    elif [[ "$port80_used" == "true" ]]; then
+      _run_acme_issue webroot "--force" || issue_rc=$?
+    else
+      _run_acme_issue standalone "--force" || issue_rc=$?
+    fi
+  fi
+
   # ── Verify the cert file actually exists before installcert ─
   if [[ $issue_rc -ne 0 ]] || [[ ! -f "$acme_cert_path" ]]; then
     fail "acme.sh --issue failed (exit ${issue_rc}). No cert at ${acme_cert_path}"
@@ -797,6 +893,11 @@ phase4a_ssl() {
     info "  • Port 80 not reachable from internet (provider firewall / security group)"
     info "  • Let's Encrypt rate-limit hit (5 certs/week per domain)"
     info "  • Server IP geo-blocked by Let's Encrypt (Iran sanctions)"
+    info ""
+    info "Manual recovery on server:"
+    info "  rm -rf /root/.acme.sh/ca /root/.acme.sh/account.conf"
+    info "  $ACME_CMD --register-account -m $CFG_EMAIL --server letsencrypt"
+    info "  $ACME_CMD --issue -d $CFG_DOMAIN --standalone --keylength ec-256 --listen-v4 --server letsencrypt --force"
     autofix_diagnose "SSL"
     return 1
   fi
@@ -820,9 +921,12 @@ phase4a_ssl() {
     chmod o+x /etc/ssl/xhttp 2>/dev/null || true
     chmod o+x "$(dirname "$SSL_KEY")" 2>/dev/null || true
     ok "SSL certificate installed → $SSL_CERT"
+    # Restart any web services we stopped to free port 80
+    [[ ${#STOPPED_SERVICES[@]} -gt 0 ]] && _restart_stopped_services
   else
     fail "SSL installcert failed — cert was issued but not copied to ${SSL_CERT}"
     info "Manually try: $ACME_CMD --installcert -d $CFG_DOMAIN --ecc --cert-file ... --key-file ... --fullchain-file ..."
+    [[ ${#STOPPED_SERVICES[@]} -gt 0 ]] && _restart_stopped_services
     autofix_diagnose "SSL"
     return 1
   fi
@@ -1010,8 +1114,8 @@ _vercel_diagnose_deploy_error() {
   local out="$1"
   echo -e "\n  ${C_MAGENTA}[AutoFix/Vercel]${C_RESET} Analysing deploy error..."
 
-  # ── Token / Auth ────────────────────────────────────────
-  if echo "$out" | grep -qiE "token|unauthorized|forbidden|401|403"; then
+  # ── Token / Auth — match strict patterns to avoid false positives ──
+  if echo "$out" | grep -qiE "Error: (Invalid token|Not authorized)|invalid_token|401 Unauthorized|403 Forbidden|expired token"; then
     fail "Auth error — Vercel token is invalid or expired"
     warn "Fix: go to https://vercel.com/account/tokens and create a new token"
     warn "Then re-run this script and paste the new token"
@@ -1019,15 +1123,15 @@ _vercel_diagnose_deploy_error() {
   fi
 
   # ── Rate limit ──────────────────────────────────────────
-  if echo "$out" | grep -qiE "rate.limit|too many|429"; then
+  if echo "$out" | grep -qiE "rate.limit|too many requests|429 Too|deployment limit"; then
     fail "Rate limit hit on Vercel API"
     warn "Fix: wait 60 seconds and retry"
     sleep 60
     return 0
   fi
 
-  # ── Project already exists with different owner ─────────
-  if echo "$out" | grep -qiE "already exists|conflict|409"; then
+  # ── Project name conflict ─ (owner mismatch / already taken globally) ──
+  if echo "$out" | grep -qiE "project.*already exists|name.*already.*taken|409 Conflict"; then
     local new_name
     new_name="relay-$(_random_str 8)"
     warn "Project name conflict — renaming to: $new_name"
@@ -1036,15 +1140,15 @@ _vercel_diagnose_deploy_error() {
     return 0
   fi
 
-  # ── Link / project.json stale ───────────────────────────
-  if echo "$out" | grep -qiE "not found|project.*not|linked|\.vercel"; then
-    warn "Stale project link — clearing .vercel cache"
+  # ── Link / project.json stale ─ specific Vercel messages only ────
+  if echo "$out" | grep -qiE "project not found|no project linked|linked to a different|\.vercel directory is invalid"; then
+    warn "Stale project link — clearing .vercel cache (will re-link before retry)"
     rm -rf "${VERCEL_DIR}/.vercel" 2>/dev/null || true
     return 0
   fi
 
   # ── Build failure ───────────────────────────────────────
-  if echo "$out" | grep -qiE "build.*fail|error.*build|npm.*err"; then
+  if echo "$out" | grep -qiE "Build (failed|error)|Failed to compile|npm ERR!|Module not found"; then
     fail "Build failed inside Vercel"
     warn "Check: api/index.js exists, package.json is valid, vercel.json is correct"
     _restore_vercel_json 2>/dev/null || true
@@ -1053,15 +1157,15 @@ _vercel_diagnose_deploy_error() {
   fi
 
   # ── Network / DNS from server ───────────────────────────
-  if echo "$out" | grep -qiE "ENOTFOUND|ETIMEDOUT|getaddrinfo|network"; then
+  if echo "$out" | grep -qiE "ENOTFOUND|ETIMEDOUT|getaddrinfo|network unreachable|connect ECONNREFUSED"; then
     fail "Network error reaching vercel.com from this server"
     warn "Check: curl -I https://vercel.com"
     curl -sI --max-time 5 https://vercel.com | head -3 || true
     return 1
   fi
 
-  # ── Scope / team error ──────────────────────────────────
-  if echo "$out" | grep -qiE "scope|team|org.*not|not.*member"; then
+  # ── Scope / team error — strict patterns ────────────────
+  if echo "$out" | grep -qiE "scope .* not found|team .* (not found|does not exist)|not a member of|invalid scope"; then
     warn "Scope/team error — clearing scope and retrying without team"
     CFG_VERCEL_SCOPE=""
     return 0
@@ -1086,20 +1190,24 @@ phase4c_vercel_deploy() {
   export VERCEL_TOKEN="${CFG_VERCEL_TOKEN}"
 
   # ── Validate token (re-prompt if invalid) ───────────────
-  local whoami_out attempt=0
+  # Success output: just a username on one line, exit 0.
+  # Failure output: contains "Error:" prefix or known auth keywords, exit !=0.
+  local whoami_out whoami_rc attempt=0
   while [[ $attempt -lt 3 ]]; do
     attempt=$(( attempt + 1 ))
-    whoami_out=$(vercel whoami --token "$CFG_VERCEL_TOKEN" 2>&1 || true)
-    if echo "$whoami_out" | grep -qiE "error|invalid|unauthorized|forbidden"; then
-      fail "Vercel token invalid (attempt $attempt/3): $whoami_out"
+    whoami_out=$(vercel whoami --token "$CFG_VERCEL_TOKEN" 2>&1); whoami_rc=$?
+    # Only treat as failure if exit code != 0 OR output starts with explicit Error:
+    if [[ $whoami_rc -ne 0 ]] || echo "$whoami_out" | grep -qiE "^(\s*)?Error:|invalid token|forbidden|401|403|unauthorized"; then
+      fail "Vercel token invalid (attempt $attempt/3)"
+      info "Server response: $(echo "$whoami_out" | head -3)"
       warn "Get a token from: https://vercel.com/account/tokens"
+      [[ $attempt -ge 3 ]] && { fail "Cannot authenticate to Vercel after 3 attempts."; popd > /dev/null; return 1; }
       CFG_VERCEL_TOKEN=$(read_secret "Paste new Vercel token")
       export VERCEL_TOKEN="${CFG_VERCEL_TOKEN}"
     else
-      ok "Vercel auth OK: $whoami_out"
+      ok "Vercel auth OK: $(echo "$whoami_out" | head -1 | tr -d '[:space:]')"
       break
     fi
-    [[ $attempt -ge 3 ]] && { fail "Cannot authenticate to Vercel after 3 attempts."; return 1; }
   done
 
   # ── Create / ensure project ─────────────────────────────
@@ -1107,24 +1215,58 @@ phase4c_vercel_deploy() {
   [[ -n "${CFG_VERCEL_SCOPE:-}" ]] && scope_args=(--scope "$CFG_VERCEL_SCOPE")
 
   info "Creating Vercel project '${CFG_PROJECT_NAME}'..."
-  vercel project add "$CFG_PROJECT_NAME" --token "$CFG_VERCEL_TOKEN" \
-    "${scope_args[@]}" 2>&1 | grep -v "^$" || true
+  local proj_out proj_rc
+  proj_out=$(vercel project add "$CFG_PROJECT_NAME" --token "$CFG_VERCEL_TOKEN" \
+    "${scope_args[@]}" 2>&1); proj_rc=$?
+  # exit 0 = created. exit !=0 might mean "already exists" (we treat that as OK)
+  if [[ $proj_rc -eq 0 ]]; then
+    ok "Project created: $CFG_PROJECT_NAME"
+  elif echo "$proj_out" | grep -qiE "already exists|Project found"; then
+    ok "Project already exists — reusing"
+  else
+    warn "Project add returned $proj_rc — continuing (link step will catch real errors)"
+    echo "$proj_out" | tail -5 | while IFS= read -r l; do echo -e "  ${C_GRAY}  $l${C_RESET}"; done
+  fi
 
-  # ── Link ────────────────────────────────────────────────
+  # ── Link helper — re-runnable from anywhere in the flow ─────
+  _vercel_link() {
+    rm -rf "${VERCEL_DIR}/.vercel" 2>/dev/null || true
+    local link_out link_rc
+    link_out=$(vercel link --yes --project "$CFG_PROJECT_NAME" \
+      --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1); link_rc=$?
+    if [[ $link_rc -ne 0 ]] && ! echo "$link_out" | grep -qiE "Linked to|Already linked"; then
+      warn "Link failed:"
+      echo "$link_out" | tail -5 | while IFS= read -r l; do echo -e "  ${C_GRAY}  $l${C_RESET}"; done
+      return 1
+    fi
+    return 0
+  }
+
   info "Linking to project..."
-  rm -rf "${VERCEL_DIR}/.vercel" 2>/dev/null || true
-  vercel link --yes --project "$CFG_PROJECT_NAME" \
-    --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1 | grep -v "^$" || true
+  _vercel_link || { fail "Could not link to project $CFG_PROJECT_NAME"; popd > /dev/null; return 1; }
+  ok "Linked to $CFG_PROJECT_NAME"
 
   # ── ENV vars ────────────────────────────────────────────
-  info "Setting environment variables..."
+  info "Setting environment variables (via stdin — required by recent Vercel CLI)..."
   local TARGET_DOMAIN_VAL="https://${CFG_DOMAIN}:${CFG_INBOUND_PORT}"
 
+  # Recent Vercel CLI deprecated --value flag. Now `vercel env add` reads the
+  # value from stdin. We pipe the value in and the flag is gone.
   _set_env() {
-    local name="$1" value="$2"
-    vercel env add "$name" production \
-      --value "$value" --force --yes \
-      --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>/dev/null || true
+    local name="$1" value="$2" out rc
+    # Try stdin-style (current CLI behavior)
+    out=$(printf '%s' "$value" | vercel env add "$name" production --force \
+          --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1 </dev/stdin); rc=$?
+    # Older CLIs that still accept --value: fall back if stdin form failed
+    if [[ $rc -ne 0 ]] && ! echo "$out" | grep -qiE "added|created|updated|overwrote|saved"; then
+      out=$(vercel env add "$name" production --value "$value" --force --yes \
+            --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1); rc=$?
+    fi
+    if [[ $rc -eq 0 ]] || echo "$out" | grep -qiE "added|created|updated|overwrote|saved"; then
+      info "  ✓ ${name}"
+    else
+      warn "  ! ${name} (rc=$rc): $(echo "$out" | head -1)"
+    fi
   }
   _set_env "TARGET_DOMAIN"               "$TARGET_DOMAIN_VAL"
   _set_env "RELAY_PATH"                  "$CFG_RELAY_PATH"
@@ -1136,7 +1278,16 @@ phase4c_vercel_deploy() {
   _set_env "SUCCESS_LOG_SAMPLE_RATE"     "$CFG_SUCCESS_LOG"
   _set_env "SUCCESS_LOG_MIN_DURATION_MS" "$CFG_SUCCESS_DUR"
   _set_env "ERROR_LOG_MIN_INTERVAL_MS"   "$CFG_ERROR_INT"
-  ok "ENV variables set"
+
+  # ── Verify ENVs actually landed on Vercel ─────────────────
+  local env_list
+  env_list=$(vercel env ls production --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1 || true)
+  if echo "$env_list" | grep -q "TARGET_DOMAIN"; then
+    ok "ENV variables verified on Vercel"
+  else
+    warn "Could not verify ENV vars — values may not have landed."
+    echo "$env_list" | head -10 | while IFS= read -r l; do echo -e "  ${C_GRAY}  $l${C_RESET}"; done
+  fi
 
   # ── Deploy with retry ───────────────────────────────────
   local deploy_attempt=0 deploy_out deploy_url=""
@@ -1155,18 +1306,23 @@ phase4c_vercel_deploy() {
 
     fail "Deploy attempt $deploy_attempt failed"
     if ! _vercel_diagnose_deploy_error "$deploy_out"; then
-      [[ $deploy_attempt -ge $AUTOFIX_MAX ]] && { fail "Deploy failed after $AUTOFIX_MAX attempts. See: $LOG_FILE"; return 1; }
+      [[ $deploy_attempt -ge $AUTOFIX_MAX ]] && { fail "Deploy failed after $AUTOFIX_MAX attempts. See: $LOG_FILE"; popd > /dev/null; return 1; }
     fi
-    # refresh scope_args in case CFG_VERCEL_SCOPE was cleared
+    # refresh scope_args in case CFG_VERCEL_SCOPE was cleared by diagnose
     scope_args=()
     [[ -n "${CFG_VERCEL_SCOPE:-}" ]] && scope_args=(--scope "$CFG_VERCEL_SCOPE")
+    # If diagnose cleared .vercel cache, we MUST re-link before next deploy
+    if [[ ! -d "${VERCEL_DIR}/.vercel" ]]; then
+      info "Re-linking project after cache clear..."
+      _vercel_link || warn "Re-link failed — next deploy may still fail"
+    fi
     sleep 3
   done
 
   # ── Extract URL ─────────────────────────────────────────
   deploy_url=$(echo "$deploy_out" | grep -oP 'https://[^\s]+\.vercel\.app' | tail -1 || true)
   [[ -z "$deploy_url" ]] && \
-    deploy_url=$(echo "$deploy_out" | grep -iP 'production' | grep -oP 'https://\S+' | tail -1 || true)
+    deploy_url=$(echo "$deploy_out" | grep -iE 'production|preview' | grep -oP 'https://\S+\.vercel\.app' | tail -1 || true)
 
   if [[ -n "$deploy_url" ]]; then
     VERCEL_URL="$deploy_url"
@@ -1469,9 +1625,21 @@ _redeploy_env_fix() {
   info "Updating ENV on Vercel and redeploying..."
   pushd "$VERCEL_DIR" > /dev/null
   local TARGET_DOMAIN_VAL="https://${CFG_DOMAIN}:${CFG_INBOUND_PORT}"
-  vercel env add "TARGET_DOMAIN"     production --value "$TARGET_DOMAIN_VAL"  --force --yes --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>/dev/null || true
-  vercel env add "RELAY_PATH"        production --value "$CFG_RELAY_PATH"      --force --yes --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>/dev/null || true
-  vercel env add "PUBLIC_RELAY_PATH" production --value "$CFG_PUBLIC_PATH"     --force --yes --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>/dev/null || true
+
+  # Use stdin-style env add (current Vercel CLI), with --value fallback for older CLIs
+  _v_env() {
+    local name="$1" value="$2" out rc
+    out=$(printf '%s' "$value" | vercel env add "$name" production --force \
+          --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1 </dev/stdin); rc=$?
+    if [[ $rc -ne 0 ]] && ! echo "$out" | grep -qiE "added|updated|saved"; then
+      vercel env add "$name" production --value "$value" --force --yes \
+        --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>/dev/null || true
+    fi
+  }
+  _v_env "TARGET_DOMAIN"     "$TARGET_DOMAIN_VAL"
+  _v_env "RELAY_PATH"        "$CFG_RELAY_PATH"
+  _v_env "PUBLIC_RELAY_PATH" "$CFG_PUBLIC_PATH"
+
   _randomize_package_json; _randomize_vercel_json
   local out
   out=$(vercel deploy --prod --yes --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1) && {
@@ -1508,8 +1676,10 @@ phase5_healthcheck() {
     direct_ok=true
   else
     fail "Upstream NOT reachable (HTTP $http1) at ${TARGET_DOMAIN_VAL}${CFG_RELAY_PATH}"
-    warn "→ Auto-fix: opening firewall port ${CFG_INBOUND_PORT}..."
-    ufw allow "${CFG_INBOUND_PORT}/tcp" 2>/dev/null || true
+    if ufw status 2>/dev/null | grep -qi "Status: active"; then
+      warn "→ Auto-fix: opening firewall port ${CFG_INBOUND_PORT}..."
+      ufw allow "${CFG_INBOUND_PORT}/tcp" 2>/dev/null || true
+    fi
     warn "→ Restarting xray..."
     systemctl restart xray 2>/dev/null || true; sleep 3
     # retry once after fix
@@ -1556,8 +1726,10 @@ phase5_healthcheck() {
         fail "HTTP 502 — Relay cannot reach your server (TARGET_DOMAIN wrong or firewall)"
         info "Current TARGET_DOMAIN: ${TARGET_DOMAIN_VAL}"
         if [[ "$direct_ok" == "false" ]]; then
-          warn "AutoFix: upstream also unreachable — fixing firewall first"
-          ufw allow "${CFG_INBOUND_PORT}/tcp" 2>/dev/null || true
+          warn "AutoFix: upstream also unreachable — restarting xray"
+          if ufw status 2>/dev/null | grep -qi "Status: active"; then
+            ufw allow "${CFG_INBOUND_PORT}/tcp" 2>/dev/null || true
+          fi
           systemctl restart xray 2>/dev/null || true; sleep 3
         fi
         warn "Please confirm TARGET_DOMAIN is correct:"
@@ -2209,9 +2381,248 @@ phase6_summary() {
   echo -e "  ${C_YELLOW}${CLIENT_LINK}${C_RESET}"
   echo ""
 
+  echo -e "  ${C_CYAN}── Management Panel ──${C_RESET}"
+  echo -e "  ${C_WHITE}Type ${C_YELLOW}xhttp${C_WHITE} anytime to open the panel${C_RESET}"
+  echo -e "  ${C_GRAY}    (view config, restart xray, renew SSL, view logs, uninstall, …)${C_RESET}"
+  echo ""
+
   echo -e "  ${C_GRAY}Full install log saved to: ${LOG_FILE}${C_RESET}"
   echo -e "${C_GREEN}  ══════════════════════════════════════════════════════════${C_RESET}"
   echo ""
+}
+
+# =============================================================
+#  PHASE 7 — INSTALL MANAGEMENT PANEL ( `xhttp` CLI )
+# =============================================================
+phase7_install_panel() {
+  step "PHASE 7 — Installing management panel ( type 'xhttp' to open )"
+
+  # ── 1. Persist install state ─────────────────────────────────
+  local STATE_DIR="/etc/xhttp-installer"
+  local STATE_FILE="${STATE_DIR}/info.env"
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
+
+  # Build the client link (same as summary)
+  local VERCEL_HOST ENCODED_PATH LINK_PADDING ENCODED_EXTRA CLIENT_LINK
+  VERCEL_HOST=$(echo "${VERCEL_URL:-}" | sed 's|https://||; s|/.*||')
+  ENCODED_PATH=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${CFG_PUBLIC_PATH}'))" 2>/dev/null || echo "${CFG_PUBLIC_PATH}")
+  LINK_PADDING="100-1000"
+  [[ "${CFG_PLATFORM:-vercel}" == "netlify" ]] && LINK_PADDING="1-1"
+  ENCODED_EXTRA="%7B%22xPaddingBytes%22%3A%22${LINK_PADDING}%22%7D"
+  CLIENT_LINK="vless://${INBOUND_UUID}@${VERCEL_HOST}:443?encryption=none&security=tls&sni=${VERCEL_HOST}&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=0&allowInsecure=0&type=xhttp&host=${VERCEL_HOST}&path=${ENCODED_PATH}&mode=auto&extra=${ENCODED_EXTRA}#XHTTP-${CFG_PLATFORM}"
+
+  cat > "$STATE_FILE" <<STATE
+# XHTTP Installer — persisted state ( do not edit by hand )
+INSTALL_DATE="$(date -Iseconds)"
+CFG_PLATFORM="${CFG_PLATFORM}"
+CFG_DOMAIN="${CFG_DOMAIN}"
+CFG_EMAIL="${CFG_EMAIL}"
+CFG_INBOUND_PORT="${CFG_INBOUND_PORT}"
+CFG_RELAY_PATH="${CFG_RELAY_PATH}"
+CFG_PUBLIC_PATH="${CFG_PUBLIC_PATH}"
+INBOUND_UUID="${INBOUND_UUID}"
+VERCEL_URL="${VERCEL_URL:-}"
+VERCEL_HOST="${VERCEL_HOST}"
+SSL_CERT="${SSL_CERT:-}"
+SSL_KEY="${SSL_KEY:-}"
+CLIENT_LINK="${CLIENT_LINK}"
+HYBRID_SUB_URL="${HYBRID_SUB_URL:-}"
+HYBRID_CONFIG_COUNT="${HYBRID_CONFIG_COUNT:-0}"
+E2E_STATUS="${E2E_STATUS:-UNKNOWN}"
+E2E_PING_AVG="${E2E_PING_AVG:-0}"
+LOG_FILE="${LOG_FILE}"
+STATE
+
+  chmod 600 "$STATE_FILE"
+  ok "State saved → $STATE_FILE"
+
+  # ── 2. Write the panel script ────────────────────────────────
+  cat > /usr/local/bin/xhttp <<'PANEL'
+#!/usr/bin/env bash
+# XHTTP Installer — management panel
+set -u
+
+STATE_FILE="/etc/xhttp-installer/info.env"
+[[ ! -f "$STATE_FILE" ]] && { echo "XHTTP Installer not found. Run the installer first."; exit 1; }
+# shellcheck source=/dev/null
+source "$STATE_FILE"
+
+C_RESET="\033[0m"; C_CYAN="\033[1;36m"; C_YELLOW="\033[1;33m"; C_GREEN="\033[1;32m"
+C_RED="\033[1;31m"; C_GRAY="\033[0;90m"; C_WHITE="\033[1;37m"; C_MAGENTA="\033[1;35m"
+
+_banner() {
+  clear
+  echo ""
+  echo -e "   ${C_CYAN}╔══════════════════════════════════════════╗${C_RESET}"
+  echo -e "   ${C_CYAN}║${C_WHITE}        XHTTP Installer — Panel         ${C_CYAN}║${C_RESET}"
+  echo -e "   ${C_CYAN}║${C_GRAY}        avaco_cloud · t.me/avaco_cloud   ${C_CYAN}║${C_RESET}"
+  echo -e "   ${C_CYAN}╚══════════════════════════════════════════╝${C_RESET}"
+  echo ""
+}
+
+_status_line() {
+  # Compact one-line status (running/stopped + port + cert expiry)
+  local xray_state="${C_RED}stopped${C_RESET}"
+  systemctl is-active --quiet xray 2>/dev/null && xray_state="${C_GREEN}running${C_RESET}"
+
+  local port_state="${C_RED}closed${C_RESET}"
+  ss -tlnp 2>/dev/null | grep -q ":${CFG_INBOUND_PORT} " && port_state="${C_GREEN}listening${C_RESET}"
+
+  local cert_expiry="?"
+  if [[ -n "${SSL_CERT:-}" && -f "${SSL_CERT}" ]]; then
+    cert_expiry=$(openssl x509 -in "$SSL_CERT" -noout -enddate 2>/dev/null | cut -d= -f2 || echo "?")
+  fi
+
+  echo -e "  ${C_WHITE}xray         :${C_RESET} ${xray_state}"
+  echo -e "  ${C_WHITE}port ${CFG_INBOUND_PORT}    :${C_RESET} ${port_state}"
+  echo -e "  ${C_WHITE}domain       :${C_RESET} ${CFG_DOMAIN}"
+  echo -e "  ${C_WHITE}platform     :${C_RESET} ${CFG_PLATFORM}"
+  echo -e "  ${C_WHITE}relay        :${C_RESET} ${VERCEL_URL:-N/A}"
+  echo -e "  ${C_WHITE}cert expiry  :${C_RESET} ${cert_expiry}"
+  if [[ "${E2E_STATUS:-}" == "PASS" ]]; then
+    echo -e "  ${C_WHITE}E2E test     :${C_RESET} ${C_GREEN}PASS${C_RESET} ${C_GRAY}(${E2E_PING_AVG}ms avg)${C_RESET}"
+  elif [[ "${E2E_STATUS:-}" == "FAIL" ]]; then
+    echo -e "  ${C_WHITE}E2E test     :${C_RESET} ${C_RED}FAIL${C_RESET}"
+  fi
+}
+
+_show_config() {
+  _banner
+  echo -e "  ${C_CYAN}── Client config ──${C_RESET}"
+  echo ""
+  echo -e "  ${C_YELLOW}${CLIENT_LINK}${C_RESET}"
+  echo ""
+  echo -e "  ${C_WHITE}UUID         :${C_RESET} ${C_YELLOW}${INBOUND_UUID}${C_RESET}"
+  echo -e "  ${C_WHITE}Domain       :${C_RESET} ${CFG_DOMAIN}"
+  echo -e "  ${C_WHITE}Port         :${C_RESET} ${CFG_INBOUND_PORT}"
+  echo -e "  ${C_WHITE}RELAY_PATH   :${C_RESET} ${CFG_RELAY_PATH}"
+  echo -e "  ${C_WHITE}PUBLIC_PATH  :${C_RESET} ${CFG_PUBLIC_PATH}"
+  echo -e "  ${C_WHITE}Relay host   :${C_RESET} ${VERCEL_HOST}"
+  echo ""
+  read -rp "  Press Enter to return..." _
+}
+
+_show_status() {
+  _banner
+  echo -e "  ${C_CYAN}── System status ──${C_RESET}"
+  echo ""
+  _status_line
+  echo ""
+
+  echo -e "  ${C_CYAN}── xray service ──${C_RESET}"
+  systemctl status xray --no-pager -n 5 2>/dev/null | head -12 | \
+    while IFS= read -r l; do echo "   $l"; done
+  echo ""
+  read -rp "  Press Enter to return..." _
+}
+
+_restart_xray() {
+  _banner
+  echo -e "  ${C_CYAN}── Restarting xray ──${C_RESET}"
+  systemctl restart xray
+  sleep 2
+  if systemctl is-active --quiet xray; then
+    echo -e "  ${C_GREEN}✔ xray restarted successfully${C_RESET}"
+  else
+    echo -e "  ${C_RED}✘ xray failed to start${C_RESET}"
+    journalctl -u xray -n 10 --no-pager | sed 's/^/   /'
+  fi
+  echo ""
+  read -rp "  Press Enter to return..." _
+}
+
+_view_logs() {
+  _banner
+  echo -e "  ${C_CYAN}── Log options ──${C_RESET}"
+  echo "    1) xray error log (last 30 lines)"
+  echo "    2) xray access log (last 30 lines)"
+  echo "    3) xray systemd journal (last 50 lines)"
+  echo "    4) install log"
+  echo "    0) back"
+  echo ""
+  read -rp "  Choose: " ch
+  case "$ch" in
+    1) tail -n 30 /var/log/xray/error.log 2>/dev/null || echo "no log"; read -rp "Enter..." _;;
+    2) tail -n 30 /var/log/xray/access.log 2>/dev/null || echo "no log"; read -rp "Enter..." _;;
+    3) journalctl -u xray -n 50 --no-pager; read -rp "Enter..." _;;
+    4) tail -n 100 "${LOG_FILE:-/tmp/xhttp-install.log}" 2>/dev/null || echo "no log"; read -rp "Enter..." _;;
+  esac
+}
+
+_renew_ssl() {
+  _banner
+  echo -e "  ${C_CYAN}── Renewing SSL certificate ──${C_RESET}"
+  local ACME="${HOME}/.acme.sh/acme.sh"
+  if [[ ! -x "$ACME" ]]; then
+    echo -e "  ${C_RED}acme.sh not found at $ACME${C_RESET}"
+    read -rp "Enter..." _; return
+  fi
+  systemctl stop xray 2>/dev/null
+  sleep 2
+  "$ACME" --renew -d "$CFG_DOMAIN" --force --ecc --server letsencrypt 2>&1 | tail -10
+  systemctl start xray 2>/dev/null
+  echo ""
+  echo -e "  ${C_GREEN}Done. New expiry:${C_RESET}"
+  openssl x509 -in "$SSL_CERT" -noout -enddate 2>/dev/null
+  echo ""
+  read -rp "Enter..." _
+}
+
+_uninstall() {
+  _banner
+  echo -e "  ${C_RED}── UNINSTALL XHTTP Installer ──${C_RESET}"
+  echo -e "  ${C_YELLOW}This will:${C_RESET}"
+  echo "    • stop & disable xray service"
+  echo "    • remove xray binary + config"
+  echo "    • remove SSL certs"
+  echo "    • remove this panel"
+  echo "    • keep acme.sh and node.js (other tools)"
+  echo ""
+  read -rp "  Type 'YES' to confirm: " confirm
+  [[ "$confirm" != "YES" ]] && { echo "Cancelled."; sleep 1; return; }
+
+  systemctl stop xray 2>/dev/null
+  systemctl disable xray 2>/dev/null
+  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ remove --purge 2>/dev/null || true
+  rm -rf /etc/ssl/xhttp "$STATE_FILE" /etc/xhttp-installer
+  rm -f /root/xhttp-configs.txt /root/xhttp-sub.txt
+  rm -f /usr/local/bin/xhttp
+  echo -e "  ${C_GREEN}✔ Uninstalled.${C_RESET}"
+  exit 0
+}
+
+# ── Main menu loop ──
+while true; do
+  _banner
+  _status_line
+  echo ""
+  echo -e "  ${C_CYAN}── Menu ──${C_RESET}"
+  echo -e "    ${C_YELLOW}1${C_RESET}) Show client config"
+  echo -e "    ${C_YELLOW}2${C_RESET}) Show detailed status"
+  echo -e "    ${C_YELLOW}3${C_RESET}) Restart xray"
+  echo -e "    ${C_YELLOW}4${C_RESET}) View logs"
+  echo -e "    ${C_YELLOW}5${C_RESET}) Renew SSL certificate"
+  echo -e "    ${C_YELLOW}6${C_RESET}) ${C_RED}Uninstall${C_RESET}"
+  echo -e "    ${C_YELLOW}0${C_RESET}) Exit"
+  echo ""
+  read -rp "  Choose [0-6]: " choice
+  case "$choice" in
+    1) _show_config ;;
+    2) _show_status ;;
+    3) _restart_xray ;;
+    4) _view_logs ;;
+    5) _renew_ssl ;;
+    6) _uninstall ;;
+    0) clear; exit 0 ;;
+    *) ;;
+  esac
+done
+PANEL
+
+  chmod +x /usr/local/bin/xhttp
+  ok "Panel installed → /usr/local/bin/xhttp"
+  info "Open anytime with: ${C_YELLOW}xhttp${C_RESET}"
 }
 
 # =============================================================
@@ -2325,6 +2736,7 @@ main() {
   autofix_and_retry "XRAYSSL" phase4b_configure_xray
   autofix_and_retry "${CFG_PLATFORM:-vercel}" phase4c_deploy
   phase5_healthcheck
+  phase7_install_panel
   phase6_summary
 }
 
