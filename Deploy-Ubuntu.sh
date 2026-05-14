@@ -1105,17 +1105,22 @@ _restore_package_json() {
 }
 
 _randomize_vercel_json() {
-  local vcfg="${VERCEL_DIR}/vercel.json"
-  [[ -f "$vcfg" ]] || return
-  ORIG_VCFG=$(cat "$vcfg")
-  local rname="edge-$(_random_str 10)"
-  jq --arg n "$rname" '.name=$n' "$vcfg" > "${vcfg}.tmp" && mv "${vcfg}.tmp" "$vcfg"
-  info "Randomized vercel.json name: $rname"
+  # NOTE: previously added a `name` field to vercel.json for obfuscation,
+  # but recent Vercel CLI rejects vercel.json containing `name` with the
+  # misleading error: "The value of the `version` property within vercel.json
+  # can only be `2`." (Vercel sees `name`, assumes legacy v1 schema, fails.)
+  # Project-name obfuscation now happens via package.json only.
+  ORIG_VCFG=""
+  return 0
 }
 
 _restore_vercel_json() {
+  # Kept for compatibility — randomization is now a no-op so there's
+  # nothing to restore. If ORIG_VCFG is set (legacy install state), still
+  # restore it to be safe.
   local vcfg="${VERCEL_DIR}/vercel.json"
   [[ -n "${ORIG_VCFG:-}" ]] && echo "$ORIG_VCFG" > "$vcfg" && info "vercel.json restored"
+  return 0
 }
 
 _vercel_diagnose_deploy_error() {
@@ -1152,6 +1157,18 @@ _vercel_diagnose_deploy_error() {
   if echo "$out" | grep -qiE "project not found|no project linked|linked to a different|\.vercel directory is invalid"; then
     warn "Stale project link — clearing .vercel cache (will re-link before retry)"
     rm -rf "${VERCEL_DIR}/.vercel" 2>/dev/null || true
+    return 0
+  fi
+
+  # ── vercel.json schema error (often misleading message about version) ──
+  if echo "$out" | grep -qiE "version.*property.*vercel\.json|vercel\.json.*can only be|vercel\.json.*invalid|unknown.*property.*vercel\.json"; then
+    fail "vercel.json schema error — likely a deprecated property like 'name'"
+    warn "Auto-fix: removing 'name' property from vercel.json if present"
+    if command -v jq &>/dev/null && [[ -f "${VERCEL_DIR}/vercel.json" ]]; then
+      jq 'del(.name)' "${VERCEL_DIR}/vercel.json" > "${VERCEL_DIR}/vercel.json.tmp" && \
+        mv "${VERCEL_DIR}/vercel.json.tmp" "${VERCEL_DIR}/vercel.json"
+      ok "Cleaned vercel.json"
+    fi
     return 0
   fi
 
