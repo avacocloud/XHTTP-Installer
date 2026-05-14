@@ -1679,16 +1679,80 @@ phase4c_netlify_deploy() {
   deploy_out=$(<"$deploy_log")
   rm -f "$deploy_log"
 
-  # Success = exit code 0 OR the text/URL pattern is present
-  if [[ $deploy_rc -eq 0 ]] || echo "$deploy_out" | grep -qiE "deploy complete|production url|deployed|live url|prod url"; then
-    VERCEL_URL=$(echo "$deploy_out" | grep -oP 'https://[a-z0-9-]+\.netlify\.app' | grep -v -- '--' | head -1 || true)
-    [[ -z "$VERCEL_URL" ]] && \
-      VERCEL_URL=$(echo "$deploy_out" | grep -oP 'https://[^\s<>]+\.netlify\.app' | tail -1 || true)
-    ok "Netlify deployed: ${VERCEL_URL:-check dashboard}"
+  # ── STRICT success check ──
+  # CLI exit code is unreliable on netlify-cli 26+ — it can return 0 even after
+  # JSONHTTPError: Forbidden. So we require BOTH no error keywords AND a
+  # parsed netlify.app URL.
+  local cli_url=""
+  cli_url=$(echo "$deploy_out" | grep -oP 'https://[a-z0-9-]+\.netlify\.app' | grep -v -- '--' | head -1 || true)
+  [[ -z "$cli_url" ]] && \
+    cli_url=$(echo "$deploy_out" | grep -oP 'https://[^\s<>]+\.netlify\.app' | tail -1 || true)
+
+  local cli_failed=false
+  if echo "$deploy_out" | grep -qiE "JSONHTTPError|Forbidden|Unauthorized|Error: .* 40[13]|deploy.*failed|access denied"; then
+    cli_failed=true
+  fi
+  [[ -z "$cli_url" ]] && cli_failed=true
+
+  if [[ "$cli_failed" == "true" ]]; then
+    fail "Netlify CLI deploy failed (likely token scope issue)"
+    info "Trying REST API zip-upload fallback..."
+
+    # ── Fallback: deploy via REST API (zip upload) ──
+    if ! command -v zip &>/dev/null; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zip 2>/dev/null || true
+    fi
+    if ! command -v zip &>/dev/null; then
+      fail "Cannot install 'zip' — REST API fallback unavailable"
+      echo "$deploy_out" | tail -10
+      return 1
+    fi
+
+    local tmp_zip
+    tmp_zip=$(mktemp --suffix=.zip)
+    pushd "$NETLIFY_DIR" > /dev/null
+    # Bundle netlify.toml + public/ + netlify/ (edge functions live under netlify/edge-functions/)
+    zip -rq "$tmp_zip" netlify.toml public netlify 2>&1 | tail -3
+    popd > /dev/null
+
+    info "Uploading zip ($(du -h "$tmp_zip" | awk '{print $1}')) to Netlify..."
+    local upload_resp upload_code
+    upload_resp=$(curl -s --max-time 90 -w "\n%{http_code}" \
+      -X POST "https://api.netlify.com/api/v1/sites/${site_id}/deploys" \
+      -H "Authorization: Bearer ${CFG_NETLIFY_TOKEN}" \
+      -H "Content-Type: application/zip" \
+      --data-binary "@${tmp_zip}" 2>&1 || true)
+    rm -f "$tmp_zip"
+    upload_code=$(echo "$upload_resp" | tail -1)
+    upload_resp=$(echo "$upload_resp" | sed '$d')
+
+    if [[ "$upload_code" == "200" || "$upload_code" == "201" ]]; then
+      VERCEL_URL=$(echo "$upload_resp" | grep -oP '"deploy_ssl_url"\s*:\s*"\K[^"]+' | head -1)
+      [[ -z "$VERCEL_URL" ]] && \
+        VERCEL_URL=$(echo "$upload_resp" | grep -oP '"ssl_url"\s*:\s*"\K[^"]+' | head -1)
+      [[ -z "$VERCEL_URL" ]] && \
+        VERCEL_URL=$(echo "$upload_resp" | grep -oP '"url"\s*:\s*"\K[^"]+' | head -1)
+      if [[ -n "$VERCEL_URL" ]]; then
+        ok "REST API deploy succeeded: ${VERCEL_URL}"
+      else
+        warn "Deploy succeeded but URL not parsed — check Netlify dashboard"
+        echo "$upload_resp" | head -c 500
+        return 1
+      fi
+    else
+      fail "REST API deploy also failed (HTTP ${upload_code})"
+      echo "$upload_resp" | head -c 500
+      echo ""
+      warn "Your Netlify token does NOT have deploy permissions."
+      info "How to fix:"
+      info "  1. Go to https://app.netlify.com/user/applications#personal-access-tokens"
+      info "  2. Create a NEW token (the old 'Personal Access Token' page — NOT scoped tokens)"
+      info "  3. Re-run this script with the new token"
+      return 1
+    fi
   else
-    fail "Netlify deploy failed (exit $deploy_rc)"
-    echo "$deploy_out" | tail -10
-    return 1
+    VERCEL_URL="$cli_url"
+    ok "Netlify deployed: ${VERCEL_URL}"
   fi
 
   # ── Verify edge function actually invokes (not Netlify's generic 404 page) ──
