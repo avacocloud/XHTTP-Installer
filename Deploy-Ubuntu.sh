@@ -1445,26 +1445,66 @@ phase4c_vercel_deploy() {
     probe_body=$(curl -sk --max-time 10 "$VERCEL_URL" 2>/dev/null | head -c 500)
 
     if [[ "$probe_code" == "401" ]] || echo "$probe_body" | grep -qi "Authentication Required\|_vercel_sso\|sso\.vercel\.com"; then
-      fail "Deployment Protection is ENABLED — relay will not work!"
-      echo ""
-      echo -e "  ${C_RED}╔════════════════════════════════════════════════════════╗${C_RESET}"
-      echo -e "  ${C_RED}║  ⚠ ACTION REQUIRED: Disable Deployment Protection    ║${C_RESET}"
-      echo -e "  ${C_RED}╚════════════════════════════════════════════════════════╝${C_RESET}"
-      echo ""
-      echo -e "  ${C_WHITE}Vercel returned HTTP 401 — your deployment is behind an${C_RESET}"
-      echo -e "  ${C_WHITE}authentication wall. Xray cannot proxy traffic through it.${C_RESET}"
-      echo ""
-      echo -e "  ${C_CYAN}How to fix:${C_RESET}"
-      echo -e "  ${C_WHITE}  1.${C_RESET} Open https://vercel.com/dashboard"
-      echo -e "  ${C_WHITE}  2.${C_RESET} Go to your project → Settings → Deployment Protection"
-      echo -e "  ${C_WHITE}  3.${C_RESET} Set both to ${C_YELLOW}Disabled${C_RESET}:"
-      echo -e "  ${C_GRAY}       • Vercel Authentication${C_RESET}"
-      echo -e "  ${C_GRAY}       • Password Protection${C_RESET}"
-      echo -e "  ${C_WHITE}  4.${C_RESET} (Team-wide) Team Settings → Deployment Protection →"
-      echo -e "  ${C_GRAY}       Default Protection → Disabled${C_RESET}"
-      echo ""
-      echo -e "  ${C_GRAY}After disabling, re-run this script (no need to recreate the project).${C_RESET}"
-      echo ""
+      warn "Deployment Protection still ENABLED (HTTP 401) — disabling via API..."
+
+      # ── Try project-level API again (more aggressive, with retries) ──
+      local prot_api_url="https://api.vercel.com/v9/projects/${CFG_PROJECT_NAME}"
+      [[ -n "${CFG_VERCEL_SCOPE:-}" ]] && prot_api_url="${prot_api_url}?teamId=${CFG_VERCEL_SCOPE}"
+      local attempt2=0 prot_rc=""
+      while [[ $attempt2 -lt 3 ]]; do
+        attempt2=$(( attempt2 + 1 ))
+        prot_rc=$(curl -s -o /tmp/.vp -w "%{http_code}" --max-time 12 \
+          -X PATCH "$prot_api_url" \
+          -H "Authorization: Bearer ${CFG_VERCEL_TOKEN}" \
+          -H "Content-Type: application/json" \
+          --data '{"ssoProtection":null,"passwordProtection":null}' 2>/dev/null || echo "000")
+        if [[ "$prot_rc" == "200" ]]; then
+          ok "Deployment Protection disabled via API"
+          break
+        fi
+        info "API attempt ${attempt2}/3 → HTTP ${prot_rc}"
+        sleep 2
+      done
+
+      # ── Also try team-level Default Protection (Pro/Team only) ──
+      if [[ -n "${CFG_VERCEL_SCOPE:-}" ]] && [[ "$prot_rc" != "200" ]]; then
+        info "Trying team-level Default Protection..."
+        curl -s -o /tmp/.vp -w "%{http_code}" --max-time 12 \
+          -X PATCH "https://api.vercel.com/v2/teams/${CFG_VERCEL_SCOPE}" \
+          -H "Authorization: Bearer ${CFG_VERCEL_TOKEN}" \
+          -H "Content-Type: application/json" \
+          --data '{"defaultProtection":"disabled"}' >/dev/null 2>&1 || true
+      fi
+      rm -f /tmp/.vp
+
+      # ── Force a fresh deploy so the new protection setting takes effect ──
+      info "Re-deploying so protection-disabled setting takes effect..."
+      _randomize_package_json
+      local redeploy_out
+      redeploy_out=$(vercel deploy --prod --yes \
+        --token "$CFG_VERCEL_TOKEN" "${scope_args[@]}" 2>&1 || true)
+      _restore_package_json
+      local new_url
+      new_url=$(echo "$redeploy_out" | grep -oP 'https://[^\s]+\.vercel\.app' | tail -1 || true)
+      [[ -n "$new_url" ]] && VERCEL_URL="$new_url"
+
+      # ── Verify protection is now off ──
+      sleep 3
+      probe_code=$(curl -sk -o /dev/null --max-time 10 -w "%{http_code}" "$VERCEL_URL" 2>/dev/null || echo "000")
+      probe_body=$(curl -sk --max-time 10 "$VERCEL_URL" 2>/dev/null | head -c 500)
+      if [[ "$probe_code" != "401" ]] && ! echo "$probe_body" | grep -qi "Authentication Required\|_vercel_sso"; then
+        ok "Deployment Protection successfully disabled (HTTP ${probe_code})"
+      else
+        # API path didn't work (Hobby plan can't even use the API, or token lacks perms).
+        # Fall back to manual instructions but keep them short.
+        fail "Could not disable Deployment Protection automatically"
+        echo ""
+        echo -e "  ${C_YELLOW}Please disable it manually (one-time, takes 10 seconds):${C_RESET}"
+        echo -e "    1. https://vercel.com/dashboard → ${CFG_PROJECT_NAME} → Settings → Deployment Protection"
+        echo -e "    2. Set ${C_YELLOW}Vercel Authentication${C_RESET} and ${C_YELLOW}Password Protection${C_RESET} both to ${C_GREEN}Disabled${C_RESET}"
+        echo -e "    3. Re-run this script or open ${C_WHITE}xhttp${C_RESET} panel → Update / Re-deploy"
+        echo ""
+      fi
     else
       ok "Deployment Protection check: OK (HTTP ${probe_code})"
     fi
