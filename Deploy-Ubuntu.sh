@@ -1226,6 +1226,13 @@ _vercel_diagnose_deploy_error() {
 phase4c_vercel_deploy() {
   step "PHASE 4c — Deploying to Vercel"
 
+  # ── IMPORTANT pre-deploy notice about Deployment Protection ──
+  echo -e "  ${C_YELLOW}⚠ IMPORTANT:${C_RESET} ${C_WHITE}Vercel Deployment Protection MUST be OFF${C_RESET}"
+  echo -e "  ${C_GRAY}    If you have Pro/Team plan, go to:${C_RESET}"
+  echo -e "  ${C_GRAY}    Team Settings → Deployment Protection → Default Protection → Disabled${C_RESET}"
+  echo -e "  ${C_GRAY}    Otherwise the relay returns HTTP 401 and Xray cannot proxy traffic.${C_RESET}"
+  echo ""
+
   if [[ ! -d "$VERCEL_DIR" ]]; then
     fail "vercel/ directory not found. Expected at: $VERCEL_DIR"
     return 1
@@ -1372,6 +1379,37 @@ phase4c_vercel_deploy() {
   if [[ -n "$deploy_url" ]]; then
     VERCEL_URL="$deploy_url"
     ok "Production URL: ${VERCEL_URL}"
+
+    # ── Detect Deployment Protection (returns 401 + Vercel SSO page) ──
+    info "Checking for Vercel Deployment Protection..."
+    local probe_code probe_body
+    probe_code=$(curl -sk -o /dev/null --max-time 10 -w "%{http_code}" "$VERCEL_URL" 2>/dev/null || echo "000")
+    probe_body=$(curl -sk --max-time 10 "$VERCEL_URL" 2>/dev/null | head -c 500)
+
+    if [[ "$probe_code" == "401" ]] || echo "$probe_body" | grep -qi "Authentication Required\|_vercel_sso\|sso\.vercel\.com"; then
+      fail "Deployment Protection is ENABLED — relay will not work!"
+      echo ""
+      echo -e "  ${C_RED}╔════════════════════════════════════════════════════════╗${C_RESET}"
+      echo -e "  ${C_RED}║  ⚠ ACTION REQUIRED: Disable Deployment Protection    ║${C_RESET}"
+      echo -e "  ${C_RED}╚════════════════════════════════════════════════════════╝${C_RESET}"
+      echo ""
+      echo -e "  ${C_WHITE}Vercel returned HTTP 401 — your deployment is behind an${C_RESET}"
+      echo -e "  ${C_WHITE}authentication wall. Xray cannot proxy traffic through it.${C_RESET}"
+      echo ""
+      echo -e "  ${C_CYAN}How to fix:${C_RESET}"
+      echo -e "  ${C_WHITE}  1.${C_RESET} Open https://vercel.com/dashboard"
+      echo -e "  ${C_WHITE}  2.${C_RESET} Go to your project → Settings → Deployment Protection"
+      echo -e "  ${C_WHITE}  3.${C_RESET} Set both to ${C_YELLOW}Disabled${C_RESET}:"
+      echo -e "  ${C_GRAY}       • Vercel Authentication${C_RESET}"
+      echo -e "  ${C_GRAY}       • Password Protection${C_RESET}"
+      echo -e "  ${C_WHITE}  4.${C_RESET} (Team-wide) Team Settings → Deployment Protection →"
+      echo -e "  ${C_GRAY}       Default Protection → Disabled${C_RESET}"
+      echo ""
+      echo -e "  ${C_GRAY}After disabling, re-run this script (no need to recreate the project).${C_RESET}"
+      echo ""
+    else
+      ok "Deployment Protection check: OK (HTTP ${probe_code})"
+    fi
   else
     warn "Could not parse production URL — check Vercel dashboard"
     VERCEL_URL="(check dashboard)"
