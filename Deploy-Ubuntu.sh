@@ -1160,14 +1160,34 @@ _vercel_diagnose_deploy_error() {
     return 0
   fi
 
-  # ── vercel.json schema error (often misleading message about version) ──
-  if echo "$out" | grep -qiE "version.*property.*vercel\.json|vercel\.json.*can only be|vercel\.json.*invalid|unknown.*property.*vercel\.json"; then
-    fail "vercel.json schema error — likely a deprecated property like 'name'"
-    warn "Auto-fix: removing 'name' property from vercel.json if present"
+  # ── vercel.json schema error (Vercel often shows misleading "version" message) ──
+  if echo "$out" | grep -qiE "version.*property.*vercel\.json|vercel\.json.*can only be|vercel\.json.*invalid|unknown.*property.*vercel\.json|Invalid vercel\.json"; then
+    fail "vercel.json schema error — Vercel rejected the configuration"
+    info "Real error from Vercel:"
+    echo "$out" | grep -iE "error:|invalid|cannot|unknown" | head -5 | \
+      while IFS= read -r l; do echo -e "  ${C_GRAY}    $l${C_RESET}"; done
+
     if command -v jq &>/dev/null && [[ -f "${VERCEL_DIR}/vercel.json" ]]; then
-      jq 'del(.name)' "${VERCEL_DIR}/vercel.json" > "${VERCEL_DIR}/vercel.json.tmp" && \
+      warn "Auto-fix: cleaning vercel.json of deprecated properties..."
+      # Strip every property known to break recent Vercel CLI:
+      #   .name           — deprecated, makes Vercel think v1 schema
+      #   .functions[].regions  — per-function regions removed
+      #   .regions        — only allowed on Pro/Enterprise plans
+      #   .$schema        — JSON Schema reference, some CLI builds reject
+      #   .builds         — legacy v1 build config
+      #   .routes         — replaced by rewrites/redirects
+      jq 'del(.name) | del(.["$schema"]) | del(.builds) | del(.routes) | del(.regions)
+          | if .functions then
+              .functions = (.functions | with_entries(.value |= del(.regions)))
+            else . end' \
+          "${VERCEL_DIR}/vercel.json" > "${VERCEL_DIR}/vercel.json.tmp" && \
         mv "${VERCEL_DIR}/vercel.json.tmp" "${VERCEL_DIR}/vercel.json"
-      ok "Cleaned vercel.json"
+      ok "Cleaned vercel.json (removed: name, \$schema, builds, routes, regions, functions.*.regions)"
+      info "Current vercel.json:"
+      cat "${VERCEL_DIR}/vercel.json" | head -20 | \
+        while IFS= read -r l; do echo -e "  ${C_GRAY}    $l${C_RESET}"; done
+    else
+      warn "jq not available — cannot auto-clean vercel.json"
     fi
     return 0
   fi
