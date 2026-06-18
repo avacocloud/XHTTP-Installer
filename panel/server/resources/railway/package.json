@@ -1,0 +1,12 @@
+{
+  "name": "avaco",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Railway relay for avaco",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

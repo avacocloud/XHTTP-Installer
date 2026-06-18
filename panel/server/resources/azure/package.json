@@ -1,0 +1,16 @@
+{
+  "name": "xhttp-relay-azure",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Azure App Service relay for avaco",
+  "scripts": {
+    "start": "node index.js",
+    "build": "node scripts/prepare-build.mjs",
+    "build:frontend": "node scripts/prepare-build.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

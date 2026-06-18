@@ -1,0 +1,31 @@
+{
+  "name": "xhttp-panel",
+  "version": "1.0.3",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch server/index.ts",
+    "build": "tsc && cp -r server/resources dist/server/ && cp server/db/schema.sql dist/server/db/schema.sql && mkdir -p dist/frontend && cp -r frontend/out dist/frontend/ && ([ -d ../deploy ] && cp -r ../deploy dist/deploy || true)",
+    "start": "node dist/server/index.js"
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.1",
+    "jsonwebtoken": "^9.0.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.10.0",
+    "@types/qrcode": "^1.5.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

@@ -32,3 +32,16 @@ secrets/
 # Vercel / Netlify local state
 .vercel/
 .netlify/
+
+# Panel build artifacts
+panel/dist/
+panel/data/
+panel/release/
+panel/frontend/out/
+panel/frontend/.next/
+
+# Graphify output
+graphify-out/
+
+# Fastly build copy
+fastly copy/

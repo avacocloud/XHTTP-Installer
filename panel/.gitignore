@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build outputs
+dist/
+frontend/.next/
+frontend/out/
+
+# Runtime data
+data/
+*.db
+
+# Secrets
+.encryption-key
+.env
+.env.local
+.env.production
+
+# Release archive (binary, tracked via GitHub Releases)
+*.tar.gz
+*.zip
+
+# Reports / debug files
+*-report-*.txt
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
