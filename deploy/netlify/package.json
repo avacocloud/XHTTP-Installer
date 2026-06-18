@@ -1,6 +1,6 @@
 {
   "name": "netlify-xhttp-relay",
-  "version": "1.0.2",
+  "version": "1.0.0",
   "description": "Netlify Edge Function HTTP relay for your own upstream service",
   "private": true,
   "license": "GPL-3.0",
